@@ -25,6 +25,11 @@ def parameters(project: Project, line, cast: dict) -> dict:
         "generation_revision": project.settings.tts.generation_revision,
         "endpoint": project.settings.tts.base_url,
         "mode": project.settings.tts.mode,
+        **(
+            {"worker_id": project.settings.tts.worker_id}
+            if project.settings.tts.mode == "gateway"
+            else {}
+        ),
     }
 
 

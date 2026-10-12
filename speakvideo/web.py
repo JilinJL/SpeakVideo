@@ -121,7 +121,7 @@ def create_app(settings: Settings) -> FastAPI:
                     result=(
                         f"已交付 {len(result['files'])} 个音频/工程文件"
                         if isinstance(result, dict) and "files" in result
-                        else f"合成 {sum(v.get('status') == 'succeeded' for v in result['lines'].values())} 行"
+                        else f"有效配音 {sum(v.get('status') == 'succeeded' for v in result['lines'].values())} 行（含复用）"
                         if isinstance(result, dict) and "lines" in result
                         else f"生成 {len(result.lines)} 行剧本"
                         if isinstance(result, Script)

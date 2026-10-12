@@ -32,6 +32,7 @@ class TTSSettings(Strict):
     mode: Literal["direct", "gateway", "demo"] = "direct"
     base_url: str = "http://127.0.0.1:8001"
     api_key: SecretStr = SecretStr("")
+    worker_id: str = "example-worker"
     timeout_seconds: float = Field(default=300, gt=0)
     job_timeout_seconds: float = Field(default=1800, gt=0)
     poll_interval_seconds: float = Field(default=1, gt=0)
@@ -91,7 +92,12 @@ def load_settings(root: Path | None = None) -> Settings:
     data = tomllib.loads(path.read_text()) if path.exists() else {}
     data["paths"] = {"root": root}
     for section, mapping in {
-        "tts": {"MODE": "mode", "BASE_URL": "base_url", "API_KEY": "api_key"},
+        "tts": {
+            "MODE": "mode",
+            "BASE_URL": "base_url",
+            "API_KEY": "api_key",
+            "WORKER_ID": "worker_id",
+        },
         "llm": {"BASE_URL": "base_url", "API_KEY": "api_key", "MODEL": "model"},
     }.items():
         for suffix, key in mapping.items():

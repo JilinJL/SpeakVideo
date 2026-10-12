@@ -2,6 +2,7 @@
 [tts]
 mode = "direct" # direct (existing qwen server), gateway (P6), demo (test tones)
 base_url = "http://127.0.0.1:8001"
+worker_id = "example-worker" # Required routing target in gateway mode.
 timeout_seconds = 300
 job_timeout_seconds = 1800
 poll_interval_seconds = 1

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import math
+import re
 import struct
 import time
 import wave
@@ -68,7 +69,10 @@ class TTSClient:
         self._client = httpx.Client(
             base_url=self._base,
             timeout=settings.tts.timeout_seconds,
-            headers={"Authorization": f"Bearer {token}"} if token else {},
+            headers={
+                **({"Authorization": f"Bearer {token}"} if token else {}),
+                **({"X-Worker-ID": settings.tts.worker_id} if self.mode == "gateway" else {}),
+            },
             trust_env=False,
         )
 
@@ -189,9 +193,9 @@ class TTSClient:
         return str(data["id"])
 
     def poll(self, job_id: str) -> dict:
-        from ..storage import safe_name
-
-        return self._request("GET", f"/v1/tts/jobs/{safe_name(job_id)}").json()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id):
+            raise TTSError("无效的远端任务 ID")
+        return self._request("GET", f"/v1/tts/jobs/{job_id}").json()
 
     def wait_job(self, job_id: str, cancelled=lambda: False) -> TTSResult:
         deadline = time.monotonic() + self.settings.tts.job_timeout_seconds

@@ -1,8 +1,8 @@
-# P6 网关接口契约（Mac 客户端 v1）
+# P6 网关接口契约（已部署 v1）
 
-这是 Mac 已实现客户端期望的契约，**不表示 Go gateway / Windows agent 已存在**。网关应只做鉴权与内存转发，作业与 `.pt` 副本由 Windows agent 管理。仅 `base_url` 不够，接入时还需设置 `tts.mode="gateway"`。
+此契约由 `gateway/` Go 服务和 `worker/` Windows 扩展实现。现网 HTTPS 地址为 `https://tts.example.com`，worker 为 `example-worker`。网关只做鉴权与内存转发，作业元数据与 `.pt` 副本由 Windows agent 管理。接入需 `tts.mode="gateway"`、Client Token 与 `worker_id`，不只是修改 `base_url`。
 
-所有接口使用 HTTPS 和 `Authorization: Bearer <token>`，错误使用非 2xx + JSON `detail`；所有音频响应必须是有效 PCM WAV，TTS 采样率 24000。
+所有客户端接口使用 HTTPS、`Authorization: Bearer <CLIENT_TOKEN>` 和 `X-Worker-ID: example-worker`，错误使用非 2xx + JSON `detail`。Worker Token 独立，只能连接 WSS worker 路由。所有音频响应为有效 PCM WAV，TTS 采样率 24000。请求体上限 32MiB，WAV 上限 64MiB，最多八个并发 HTTP 请求；单 GPU 串行。
 
 ## 健康与音色
 
@@ -15,7 +15,7 @@
 [{"role":"示例角色","emotion":"平静","path":"示例角色/示例角色_平静.pt","sha256":"<sha256>"}]
 ```
 
-Windows 应校验路径、哈希，原子落盘，再回复：
+Windows 校验路径、哈希和 Qwen prompt 结构，原子落盘，再回复：
 
 ```json
 {"voices":[{"role":"示例角色","emotion":"平静","sha256":"<sha256>"}]}
@@ -28,7 +28,7 @@ Mac 只在确认接收哈希一致后提交配音。同步所需音色子集，�
 - `POST /v1/voices/create`：multipart `file` 为参考音频，`metadata` 为 JSON 字符串，字段 `role/emotion/ref_text/overwrite`。Windows 在内存接收音频、调用 clone prompt、保存 pt 副本，返回 JSON 成功信息。Mac 再调用 download，保存到自己的主资产目录。
 - `POST /v1/voices/design`：JSON `text/instruct/language/mode="file"/allow_download=false`，响应 WAV 字节；不自动固化。Mac 保存试听音频，用户确认后调用 create。
 
-这两个接口是 Mac 对未来网关的要求。原 Qwen 的 upload + create 依赖服务器磁盘路径；agent 需要提供适配，不能原样把 Mac 路径传给 Windows。
+这两个接口通过 agent RPC 适配。Qwen 的内存补丁接收 `ref_audio_base64`，直接解码为数组 / 采样率，不把 Mac 路径传给 Windows，也不上传临时参考音频文件。音色设计使用 `persist=false`；本地设计模型缺失时明确失败，不擅自下载。
 
 ## 持久化配音作业
 
@@ -39,7 +39,7 @@ Mac 只在确认接收哈希一致后提交配音。同步所需音色子集，�
  "voice_sha256":"<Mac pt SHA256>","generation_revision":"qwen3-base-1.7b-v1"}
 ```
 
-响应 `{"id":"<job-id>"}`。ID 限制为字母数字下划线横线，不含斜线。相同幂等键 / 相同内容必须返回相同作业；同键不同内容拒绝。**须在响应之前持久化幂等映射与作业**，以覆盖请求成功但 Mac 丢失响应的情况。
+响应 `202 {"id":"<job-id>"}`。现有 ID 为 `j_` + SHA256(worker_id + NUL + Idempotency-Key)，Mac 接受 1–128 个字母数字下划线横线，不含斜线。相同幂等键 / 相同内容返回相同作业，同键不同内容返回 409。Windows SQLite `synchronous=FULL` 在接受确认前提交任务 ID、参数摘要与状态，网关等到 `job.accepted` 才返回。
 
 `GET /v1/tts/jobs/{id}`：
 
@@ -56,8 +56,18 @@ Mac 只在确认接收哈希一致后提交配音。同步所需音色子集，�
 
 ## 恢复约束
 
-Mac 会在 POST 前保存幂等键、POST 后保存 job ID，再开始轮询。断线不抹掉 job ID；明确失败之后显式重试可创建新代次。轮询等待时间默认 1800 秒（配置可调），单次 HTTP 请求默认 300 秒。
+Mac 在 POST 前保存幂等键、POST 后保存 job ID，再开始轮询。断线不抹掉 job ID；明确失败之后显式重试可创建新代次。当前机器配置轮询与请求等待为 3600 秒；首次默认配置为 1800 / 300 秒。
 
-“只在内存保存音频”与“进程崩溃后永不重复推理”无法同时完整保证。agent 应持久化元数据；若其进程重启丢失结果音频，须返回明确失败 / 结果已丢失，Mac 再显式重试。网关仅做内存转发并不意味着 Windows 原 Qwen 服务也不会落盘。
+网关重启不丢 Windows 作业；WSS 自动重连后 `job.query` 从 Windows 查询状态与内存音频。Windows agent 重启时，旧 queued/running/succeeded 元数据统一标为失败 `worker_restarted_result_lost`，重复提交旧键也不会重复入队。音频缓存淘汰返回 `audio_cache_evicted`，须 Mac 显式重试。已下载到 Mac 的有效 WAV 不受影响。
 
-Mac 的暂停停止继续提交与轮询，不会调用未定义的 cancel 接口。远端串行队列必须独立保证线程 / 进程间 GPU 互斥。
+Mac 的暂停停止继续提交与轮询，不调用 cancel。Windows 队列串行，独占 agent 进程锁；Qwen 自身仍使用 inference_lock，音色同步 / 创建 / 设计与配音共用 asset_lock。推理前再次核验实际 `.pt` 的 `voice_sha256`。
+
+## WSS 协议适配
+
+`GET /v1/worker/ws`：独立 Worker Token + `X-Worker-ID`，首帧 `worker.hello` 的 `protocol="1"`、`capabilities.rpc=true` 、`durable_jobs=true` 和 `correlated_acks=true` 必须匹配。最多一个活动 worker，重复连接不能替换原连接。
+
+- 既有事件：`job.submit {job:{...}}` → `job.accepted/job.rejected/job.running/job.result`；`voice.sync {sync_id,files:[{path,sha256,content_base64}]}` → `voice.sync.result`。
+- 每次 job.submit 另带随机 request_id，accepted/rejected 必须原样回传；稳定 job_id 用于幂等，request_id 用于本次确认。迟到确认不能匹配新的提交。
+- 扩展 RPC：`worker.health`、`job.query`、`voice.list/download/create/design`，每次带随机 `request_id`，返回 `rpc.result`。RPC 失败使用 `rpc_error`，任务失败仍是合法的 `status="failed",error=...` 查询结果。
+- `job.query include_audio=true` 才返回 base64 WAV，网关解码后直接写 HTTP 响应；状态轮询不携带音频。
+- WebSocket ping/pong 保活，不输出 Token、台词或音频数据到网关日志。

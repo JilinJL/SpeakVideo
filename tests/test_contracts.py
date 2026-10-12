@@ -149,6 +149,24 @@ def test_gateway_rejects_cross_origin_audio(project):
             client.wait_job("abc")
 
 
+def test_gateway_accepts_full_sha256_job_id_and_rejects_path_traversal(project):
+    project.settings.tts.mode = "gateway"
+    with TTSClient(project.settings) as client:
+        job_id = "j_" + "a" * 64
+        client._client.close()
+        client._client = httpx.Client(
+            base_url=client._base,
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(
+                    200, json={"id": r.url.path.rsplit("/", 1)[-1], "status": "running"}
+                )
+            ),
+        )
+        assert client.poll(job_id)["id"] == job_id
+        with pytest.raises(TTSError, match="任务 ID"):
+            client.poll("../../secret")
+
+
 def test_voice_factory_uses_upload_path_and_downloads_pt(project, tmp_path):
     project.settings.tts.mode = "direct"
     reference = tmp_path / "ref.wav"

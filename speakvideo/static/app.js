@@ -23,6 +23,7 @@ async function inventory(){
 async function selectProject(name){
   if (dirty && !confirm('有未保存修改，仍要切换工程吗？')) return;
   current = name; data = await api(url('')); dirty = false;
+  const link = new URL(window.location.href); link.searchParams.set('project', current); history.replaceState(null, '', link);
   $('welcome').hidden = true; $('workspace').hidden = false;
   $('projectName').textContent = current; $('title').textContent = data.script.meta.topic || '未命名对话';
   $('topic').value = data.script.meta.topic; $('keywords').value = data.script.meta.keywords.join(',');
@@ -120,7 +121,7 @@ $('designVoice').onclick=()=>safe(async()=>{await queue('/api/voices/actions',vo
 $('createVoice').onclick=()=>safe(async()=>{if(!referenceId)throw Error('请先上传参考音频或生成试音');await queue('/api/voices/actions',voiceBody('create'));toast('音色固化任务已排队');});
 $('syncVoices').onclick=()=>safe(async()=>{await queue('/api/voices/actions',{action:'sync'});toast('同步任务已排队');});
 window.addEventListener('beforeunload',event=>{if(dirty){event.preventDefault();event.returnValue='';}});
-safe(async()=>{config=await api('/api/config');$('mode').textContent=config.tts_mode==='demo'?'测试模式 · 非真实配音':config.tts_mode==='gateway'?'网关模式':'Qwen 直连模式';await inventory();await pollTasks();const names=await api('/api/projects');if(names.length)await selectProject(names[0].name);setInterval(()=>safe(pollTasks),2000);});
+safe(async()=>{config=await api('/api/config');$('mode').textContent=config.tts_mode==='demo'?'测试模式 · 非真实配音':config.tts_mode==='gateway'?'网关模式':'Qwen 直连模式';await inventory();await pollTasks();const names=await api('/api/projects');const requested=new URLSearchParams(location.search).get('project');if(names.length)await selectProject(names.find(p=>p.name===requested)?.name||names[0].name);setInterval(()=>safe(pollTasks),2000);});
 
 $('saveMix').onclick=()=>safe(async()=>{data.media=await api(url('/mix'),'PUT',{bgm_volume:Number($('bgmVolume').value)});renderMedia();toast('混音设置已保存，重新导出后生效');});
 $('removeBgm').onclick=()=>safe(async()=>{data.media=await api(url('/mix'),'PUT',{bgm_volume:Number($('bgmVolume').value),remove_bgm:true});renderMedia();toast('已移除音乐，重新导出后生效');});

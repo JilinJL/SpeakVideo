@@ -14,7 +14,7 @@ from .tts.client import TTSClient
 from .voices import VoiceStore
 from .workflow import advance, generate_brief, generate_script
 
-app = typer.Typer(help="SpeakVideo · Mac 自动化视频工作台", no_args_is_help=True)
+app = typer.Typer(help="SpeakVideo · Mac 对谈音频工作台", no_args_is_help=True)
 voices = typer.Typer(help="本地音色工厂与同步")
 script = typer.Typer(help="编剧阐述、结构化与验证")
 app.add_typer(voices, name="voices")

@@ -10,6 +10,16 @@ jobs:
           enable-cache: true
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-noto-cjk
       - run: uv sync --locked --python 3.11
-      - run: uv run ruff check speakvideo tests
-      - run: uv run ruff format --check speakvideo tests
+      - run: uv run ruff check speakvideo worker deploy tests
+      - run: uv run ruff format --check speakvideo worker deploy tests
       - run: uv run pytest -q
+  gateway:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: gateway/go.mod
+          cache-dependency-path: gateway/go.sum
+      - run: go -C gateway vet ./...
+      - run: go -C gateway test -race ./...
