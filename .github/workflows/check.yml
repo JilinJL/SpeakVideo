@@ -1,0 +1,15 @@
+name: checks
+on: [push, pull_request]
+jobs:
+  mac-orchestrator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-noto-cjk
+      - run: uv sync --locked --python 3.11
+      - run: uv run ruff check speakvideo tests
+      - run: uv run ruff format --check speakvideo tests
+      - run: uv run pytest -q

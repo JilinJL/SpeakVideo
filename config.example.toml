@@ -1,0 +1,25 @@
+# Copy to config.local.toml. Secrets belong in environment variables.
+[tts]
+mode = "direct" # direct (existing qwen server), gateway (P6), demo (test tones)
+base_url = "http://127.0.0.1:8001"
+timeout_seconds = 300
+job_timeout_seconds = 1800
+poll_interval_seconds = 1
+max_retries = 2
+# Bump when the remote model/torch/generation settings change.
+generation_revision = "qwen3-base-1.7b-v1"
+
+[llm]
+base_url = "https://api.openai.com/v1"
+model = "" # Set to a model offered by your provider.
+json_mode = true
+timeout_seconds = 180
+
+[script]
+max_line_chars = 100
+
+[audio]
+master_lufs = -16
+master_true_peak = -1.5
+bgm_volume = 0.18
+# narration uses -16 LUFS / -1.5 dBTP, raw segments remain 24kHz.
