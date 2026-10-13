@@ -1,13 +1,221 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>SpeakVideo · 音频工作台</title><link rel="stylesheet" href="/style.css"></head><body>
-<aside><a class="brand" href="/">S<span>SpeakVideo</span></a><p class="muted">从想法到完整对谈音频</p><div id="mode" class="badge"></div><h4>我的工程</h4><div id="projects"></div><button id="new" class="outline">＋ 新建工程</button><h4>音色资产</h4><div id="voiceInventory"></div><p class="muted">Mac 保存主副本<br>GPU 服务负责推理</p></aside>
-<main><header><div><small>工作台 / <span id="projectName">选择工程</span></small><h1 id="title">让好想法，开口说话。</h1></div><span id="saveState" class="badge">准备就绪</span></header>
-<section id="welcome" class="panel"><h2>开始一段新的对话</h2><p>先写编剧阐述，再定稿台词。绑定音色后，生成配音与混音。</p><button id="welcomeNew">创建工程 →</button><p class="muted">真实生成需先配置 LLM 和 TTS 服务。离线演示：uv run speakvideo demo</p></section>
-<div id="workspace" hidden><nav id="steps"><button data-tab="script" class="active">01 剧本创作</button><button data-tab="binding">02 音色绑定</button><button data-tab="production">03 配音与混音</button></nav>
-<section id="script" class="tab"><div class="panel"><div class="heading"><h2>编剧阐述</h2><button data-action="brief" class="outline">重新生成阐述</button></div><label>话题<input id="topic"></label><div class="two"><label>关键词<input id="keywords" placeholder="逗号分隔"></label><label>创作导向<input id="guidance" placeholder="希望传达什么观点？"></label></div><textarea id="brief" rows="7" placeholder="核心论点、人物风格、包袱抛接与节奏……"></textarea><div class="toolbar"><button data-action="generate">阐述 → 生成剧本</button><span class="muted">重生成将替换全部台词，旧版保存在 history。</span></div></div>
-<div class="panel"><div class="heading"><h2>逐句编辑</h2><div><button id="addLine" class="outline">＋ 添加台词</button><button id="save">保存修改</button></div></div><div class="two" id="personas"></div><div id="lines"></div><p class="muted">拖动行左侧手柄排序；行 ID 保持稳定，排序与停顿修改无需重跑配音。</p><button data-approve="script">确认剧本定稿 →</button></div></section>
-<section id="binding" class="tab" hidden><div class="panel"><h2>给角色一个声音</h2><p class="muted">每个用到的 mood 都必须明确映射到一个真实音色。未映射会阻止合成。</p><div id="bindings"></div><button data-approve="binding">确认音色绑定 →</button></div>
-<div class="panel"><h2>音色工厂</h2><div class="two"><label>角色名称<input id="voiceRole" placeholder="例如 示例角色"></label><label>情感名称<input id="voiceEmotion" value="平静"></label></div><label>对应台词<textarea id="voiceText" rows="2" placeholder="参考音频/试音中实际说出的文字"></textarea></label><label>音色描述<input id="voiceDescription" placeholder="用于提示词试音；参考克隆可留空"></label><div class="toolbar"><button id="designVoice">描述 → 试音</button><label class="filebutton">上传参考音频<input id="voiceFile" type="file" accept="audio/*"></label><button id="createVoice" class="outline">将当前参考固化为 pt</button><button id="syncVoices" class="outline">同步到网关</button></div><audio id="voicePreview" controls hidden></audio><p id="referenceState" class="muted">先上传参考音频，或设计并试听，再固化。</p></div></section>
-<section id="production" class="tab" hidden><div class="panel"><div class="heading"><h2>生成前检查</h2><button id="preflight" class="outline">检查远端可用性</button></div><div id="report"></div><div class="toolbar"><button data-action="run">继续完整工作流</button><button data-action="synth" class="outline">合成 / 断点续跑</button><button data-action="merge" class="outline">合并 / 混音导出</button></div></div><div class="panel"><h2>背景音乐</h2><p class="muted">BGM 循环填满整段音频，并在人声出现时自动降低音量。不选音乐时导出纯对谈。</p><div class="toolbar"><label class="filebutton">＋ 背景音乐<input id="bgmFile" type="file" accept="audio/*"></label><button id="removeBgm" class="outline">移除音乐</button><label>BGM 音量<input id="bgmVolume" type="number" min="0" max="1" step="0.01" value="0.18"></label><button id="saveMix" class="outline">保存混音设置</button></div><div id="mediaState" class="muted"></div></div><div class="panel"><h2>完整音频试听</h2><audio id="masterAudio" controls preload="metadata" hidden></audio><p id="audioState" class="muted">先合成分句，再合并导出。</p><div id="exports"></div><button data-approve="audio">确认完整音频</button></div></section>
-</div><section class="panel"><div class="heading"><h2>作业进度</h2><span class="muted">串行执行 · 自动保存断点</span></div><div id="tasks">暂无任务</div></section><div id="toast" role="status" hidden></div></main>
-<dialog id="newDialog"><form id="newForm"><h2>新建音频工程</h2><label>工程名称<input name="name" required placeholder="episode-01" pattern="[\w\-\u4e00-\u9fa5]+"></label><label>话题<input name="topic" required placeholder="为什么年轻人开始拒绝加班"></label><label>关键词<input name="keywords" placeholder="996,内卷,00后"></label><div class="toolbar"><button type="submit">创建工程</button><button type="button" id="closeDialog" class="outline">取消</button></div></form></dialog>
-<script src="/app.js"></script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpeakVideo · 音频工作台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="shell">
+
+  <!-- ───────── 左栏：工程与音色库 ───────── -->
+  <aside class="side">
+    <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>SpeakVideo</a>
+    <div id="mode" class="mode"></div>
+    <button id="openConnections" class="btn ghost sm side-tool">连接状态 <span id="connectionDot">检测中</span></button>
+    <button id="openLLM" class="btn ghost sm side-tool">LLM 配置 <span id="llmLabel"></span></button>
+
+    <div class="side-head"><h4>工程</h4><button id="new" class="icon-btn" title="新建工程" aria-label="新建工程">＋</button></div>
+    <input id="projectFilter" class="side-filter" placeholder="搜索工程" aria-label="搜索工程">
+    <div id="projects" class="project-list"></div>
+
+    <div class="side-head"><h4>音色库</h4><div class="row"><button id="openLibrary" class="btn ghost sm">管理</button><button id="openFactory" class="icon-btn" title="音色工厂" aria-label="打开音色工厂">＋</button></div></div>
+    <div id="voiceInventory" class="voice-list"></div>
+  </aside>
+
+  <!-- ───────── 中栏：工作区 ───────── -->
+  <main class="main">
+    <header class="topbar">
+      <div class="title-block">
+        <small id="projectName">未选择工程</small>
+        <h1 id="title">SpeakVideo</h1>
+      </div>
+      <nav id="steps" class="steps" hidden>
+        <button data-tab="script" class="step active"><b>1</b>剧本</button>
+        <button data-tab="binding" class="step"><b>2</b>音色</button>
+        <button data-tab="production" class="step"><b>3</b>生成</button>
+      </nav>
+      <div class="top-actions">
+        <span id="saveState" class="save-state">准备就绪</span>
+        <button id="railToggle" class="btn ghost sm rail-toggle">任务 <span id="taskBadge"></span></button>
+        <button id="save" class="btn" hidden>保存 <kbd>⌘S</kbd></button>
+      </div>
+    </header>
+
+    <section id="welcome" class="welcome" hidden>
+      <h2>开始一段新的对话</h2>
+      <p>写编剧阐述、定稿台词、绑定音色，然后生成配音与混音。</p>
+      <button id="welcomeNew" class="btn primary">新建工程</button>
+      <p class="muted small">真实生成需先配置 LLM 和 TTS 服务。离线演示可运行 <code>uv run speakvideo demo</code>。</p>
+    </section>
+
+    <div id="workspace" class="workspace" hidden>
+
+      <!-- 第 1 步：剧本 -->
+      <section id="script" class="tab tab-script">
+        <div class="card brief-card">
+          <div class="card-head"><h2>编剧阐述</h2><button data-action="brief" class="btn ghost sm">重新生成</button></div>
+          <label class="field">话题<input id="topic"></label>
+          <label class="field">关键词<input id="keywords" placeholder="逗号分隔"></label>
+          <label class="field">创作导向<input id="guidance" placeholder="希望传达什么观点？"></label>
+          <label class="field grow">阐述<textarea id="brief" rows="8" placeholder="核心论点、人物风格、包袱抛接与节奏……"></textarea></label>
+          <div id="personas" class="personas"></div>
+          <div class="card-foot">
+            <button data-action="generate" class="btn">按阐述生成剧本</button>
+            <p class="hint">会替换全部台词，旧版保留在 history。</p>
+          </div>
+        </div>
+
+        <div class="card lines-card">
+          <div class="card-head sticky">
+            <div class="head-meta"><h2>台词</h2><span id="lineStats" class="muted small"></span></div>
+            <div class="row">
+              <button id="addLine" class="btn ghost sm">＋ 添加台词</button>
+              <button data-approve="script" class="btn primary sm">定稿，去绑定音色</button>
+            </div>
+          </div>
+          <div id="lines" class="lines"></div>
+          <p class="hint pad">拖动左侧手柄排序。行 ID 稳定不变，调整顺序和停顿不需要重新配音。</p>
+        </div>
+      </section>
+
+      <!-- 第 2 步：音色绑定 -->
+      <section id="binding" class="tab" hidden>
+        <div class="card">
+          <div class="card-head">
+            <div class="head-meta"><h2>给角色一个声音</h2><span class="muted small">每个用到的情绪都要映射到一个真实音色，未映射会阻止合成。</span></div>
+            <div class="row">
+              <button class="btn ghost sm" data-open-factory>没有合适的音色？去音色工厂</button>
+              <button data-approve="binding" class="btn primary sm">确认绑定，去生成</button>
+            </div>
+          </div>
+          <div id="bindings" class="bindings"></div>
+        </div>
+      </section>
+
+      <!-- 第 3 步：生成 -->
+      <section id="production" class="tab tab-production" hidden>
+        <div class="card">
+          <div class="card-head"><h2>生成前检查</h2><button id="preflight" class="btn ghost sm">检查远端可用性</button></div>
+          <div id="report" class="report"></div>
+          <div id="lineMap" class="line-map" title="每格一行台词"></div>
+          <div class="card-foot row">
+            <button data-action="run" class="btn primary">运行完整工作流</button>
+            <button data-action="synth" class="btn">合成 / 断点续跑</button>
+            <button data-action="merge" class="btn">合并并导出</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>背景音乐</h2><span id="mediaState" class="pill"></span></div>
+          <p class="hint">BGM 循环铺满整段音频，人声出现时自动压低。不选则导出纯对谈。</p>
+          <div class="mix-row">
+            <label class="btn file">选择音乐文件<input id="bgmFile" type="file" accept="audio/*"></label>
+            <button id="removeBgm" class="btn ghost">移除</button>
+          </div>
+          <label class="field">音量 <output id="bgmVolumeOut"></output>
+            <input id="bgmVolume" type="range" min="0" max="1" step="0.01" value="0.18">
+          </label>
+          <div class="card-foot"><button id="saveMix" class="btn">保存混音设置</button></div>
+        </div>
+
+        <div class="card span-2">
+          <div class="card-head"><h2>完整音频</h2><span id="audioState" class="muted small"></span></div>
+          <audio id="masterAudio" controls preload="metadata" aria-label="完整音频试听" hidden></audio>
+          <div id="exports" class="exports"></div>
+          <div class="card-foot"><button data-approve="audio" class="btn primary">确认完整音频</button></div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- ───────── 右栏：任务队列 ───────── -->
+  <aside class="rail">
+    <div class="rail-head"><h4>任务</h4><span class="muted small">串行执行 · 自动断点</span></div>
+    <div id="tasks" class="tasks"></div>
+  </aside>
+</div>
+
+<div id="toast" role="status" hidden></div>
+
+<!-- 新建工程 -->
+<dialog id="newDialog" class="dialog">
+  <form id="newForm">
+    <h2>新建音频工程</h2>
+    <label class="field">工程名称<input name="name" required placeholder="episode-01" pattern="[\w\-\u4e00-\u9fa5]+"></label>
+    <label class="field">话题<input name="topic" required placeholder="为什么年轻人开始拒绝加班"></label>
+    <label class="field">关键词<input name="keywords" placeholder="996, 内卷, 00后"></label>
+    <div class="dialog-foot">
+      <button type="button" id="closeDialog" class="btn ghost">取消</button>
+      <button type="submit" class="btn primary">创建工程</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- 音色工厂（全局，与工程无关） -->
+<dialog id="factoryDialog" class="dialog wide">
+  <div class="dialog-head"><h2>音色工厂</h2><button id="closeFactory" class="icon-btn" aria-label="关闭">✕</button></div>
+  <p class="hint">直接录音、上传参考音频，或用文字描述生成试音；满意后固化为 pt 音色。</p>
+  <div class="grid-2">
+    <label class="field">角色名称<input id="voiceRole" placeholder="例如 示例角色"></label>
+    <label class="field">情感名称<input id="voiceEmotion" value="平静"></label>
+  </div>
+  <label class="field">对应台词<textarea id="voiceText" rows="2" placeholder="参考音频 / 试音中实际说出的文字"></textarea></label>
+  <label class="field">音色描述<input id="voiceDescription" placeholder="用于描述试音；参考音频克隆可留空"></label>
+  <div class="row">
+    <label class="btn file">上传参考音频<input id="voiceFile" type="file" accept="audio/*"></label>
+    <button id="recordVoice" class="btn">开始录音</button>
+    <button id="stopRecording" class="btn danger" hidden>停止并使用录音</button>
+    <span id="recordingTime" class="muted small" aria-live="polite"></span>
+    <span class="or">或</span>
+    <button id="designVoice" class="btn">按描述生成试音</button>
+  </div>
+  <audio id="voicePreview" controls hidden></audio>
+  <p id="referenceState" class="ref-state">尚未提供参考音频。</p>
+  <div class="dialog-foot">
+    <label class="check"><input id="voiceOverwrite" type="checkbox">替换同名音色</label>
+    <button id="syncVoices" class="btn ghost">同步音色到网关</button>
+    <button id="createVoice" class="btn primary">固化为 pt 音色</button>
+  </div>
+</dialog>
+
+<dialog id="libraryDialog" class="dialog library-dialog">
+  <div class="dialog-head"><h2>音色库管理</h2><button id="closeLibrary" class="icon-btn" aria-label="关闭音色库">✕</button></div>
+  <div class="row library-toolbar"><input id="voiceSearch" placeholder="搜索角色、情感或备注" aria-label="搜索 PT"><button id="libraryCreate" class="btn">克隆 / 设计新音色</button><button id="showVoiceTrash" class="btn ghost">删除与替换备份</button></div>
+  <div class="library-grid">
+    <div id="voiceAssets" class="asset-list"></div>
+    <form id="voiceEditForm" class="voice-detail">
+      <h3 id="voiceDetailTitle">导入 PT</h3>
+      <div class="grid-2"><label class="field">角色<input id="assetRole" required></label><label class="field">情感<input id="assetEmotion" value="平静" required></label></div>
+      <label class="field">参考台词（备注）<textarea id="assetRefText" rows="2"></textarea></label>
+      <label class="field">备注<textarea id="assetNotes" rows="2"></textarea></label>
+      <p id="assetInfo" class="hint"></p><p id="assetUsage" class="hint"></p>
+      <div class="row"><button class="btn primary" type="submit" id="saveVoiceAsset">保存修改</button><label class="btn file"><span id="ptUploadLabel">导入 PT 文件</span><input id="ptFile" type="file" accept=".pt"></label><button id="newVoiceAsset" type="button" class="btn ghost">新建条目</button></div>
+      <div id="assetExisting" hidden>
+        <div class="row asset-actions"><a id="downloadPT" class="btn" download>下载 PT</a><button id="deletePT" type="button" class="btn ghost danger">删除到备份</button></div>
+        <label class="field">试听台词<input id="assetPreviewText" value="你好，这是一段音色试听。"></label><button id="previewPT" type="button" class="btn">生成试听</button><audio id="assetPreview" controls hidden></audio>
+      </div>
+    </form>
+  </div>
+  <div id="voiceTrash" hidden></div>
+</dialog>
+
+<dialog id="llmDialog" class="dialog llm-dialog">
+  <div class="dialog-head"><h2>LLM 配置</h2><button id="closeLLM" class="icon-btn" aria-label="关闭 LLM 配置">✕</button></div>
+  <p class="hint">支持 OpenAI 兼容接口。每个供应商可配置多个 Key，认证失败、限流或临时故障时依次尝试下一 Key。Key 保存到本机私有配置，页面不会回显。</p>
+  <div id="llmProviders"></div>
+  <div class="row"><button id="addLLMProvider" class="btn">＋ 添加供应商</button><label class="check"><input id="llmFailover" type="checkbox">允许切换到其他已启用供应商</label></div>
+  <p id="llmTestState" class="ref-state" aria-live="polite"></p>
+  <div class="dialog-foot"><button id="testLLM" class="btn">保存并测试默认模型</button><button id="saveLLM" class="btn primary">保存配置</button></div>
+</dialog>
+
+<dialog id="connectionDialog" class="dialog wide">
+  <div class="dialog-head"><h2>连接状态</h2><button id="closeConnections" class="icon-btn" aria-label="关闭连接状态">✕</button></div>
+  <div id="connectionDetails" class="connection-details"></div>
+  <div class="dialog-foot"><button id="checkConnections" class="btn primary">重新检测连接</button></div>
+</dialog>
+
+<script src="/app.js"></script>
+</body>
+</html>

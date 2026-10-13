@@ -7,15 +7,19 @@ import subprocess
 from pathlib import Path
 
 
-def ffmpeg(args: list[str], cwd: Path | None = None) -> str:
+def ffmpeg(args: list[str], cwd: Path | None = None, timeout: float | None = None) -> str:
     if not shutil.which("ffmpeg"):
         raise RuntimeError("请安装 ffmpeg：brew install ffmpeg")
-    result = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-nostdin", "-y", *map(str, args)],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-nostdin", "-y", *map(str, args)],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("音频处理超时，请使用更短或未损坏的参考音频") from exc
     if result.returncode:
         raise RuntimeError("ffmpeg 失败：" + result.stderr[-3500:])
     return result.stderr

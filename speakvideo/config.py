@@ -5,7 +5,7 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 
 class Strict(BaseModel):
@@ -40,12 +40,81 @@ class TTSSettings(Strict):
     generation_revision: str = "qwen3-base-1.7b-v1"
 
 
+class LLMEndpoint(Strict):
+    id: str
+    name: str = ""
+    base_url: str
+    model: str
+    api_keys: list[SecretStr] = Field(default_factory=list)
+    enabled: bool = True
+    json_mode: bool = True
+    timeout_seconds: float = Field(default=180, gt=0, le=3600)
+    max_tokens: int = Field(default=8192, ge=32, le=131072)
+
+    @model_validator(mode="after")
+    def valid_url(self):
+        from urllib.parse import urlparse
+
+        from .storage import safe_name
+
+        safe_name(self.id)
+        parsed = urlparse(self.base_url)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("LLM 地址必须为不含凭据或查询参数的 HTTP(S) URL")
+        if not self.model.strip():
+            raise ValueError("请填写模型名称")
+        return self
+
+
 class LLMSettings(Strict):
     base_url: str = "https://api.openai.com/v1"
     api_key: SecretStr = SecretStr("")
     model: str = ""
     json_mode: bool = True
     timeout_seconds: float = Field(default=180, gt=0)
+    providers: list[LLMEndpoint] = Field(default_factory=list)
+    active_provider: str = ""
+    failover: bool = True
+
+    @model_validator(mode="after")
+    def unique_providers(self):
+        ids = [p.id for p in self.providers]
+        if len(ids) != len(set(ids)):
+            raise ValueError("供应商 ID 重复")
+        if self.providers and self.active_provider not in ids:
+            raise ValueError("请选择有效的默认供应商")
+        return self
+
+    def endpoints(self) -> list[LLMEndpoint]:
+        if not self.providers:
+            return (
+                [
+                    LLMEndpoint(
+                        id="legacy",
+                        name="原有配置",
+                        base_url=self.base_url,
+                        model=self.model,
+                        api_keys=[self.api_key],
+                        json_mode=self.json_mode,
+                        timeout_seconds=self.timeout_seconds,
+                    )
+                ]
+                if self.model
+                else []
+            )
+        active = [p for p in self.providers if p.enabled and p.id == self.active_provider]
+        return active + (
+            [p for p in self.providers if p.enabled and p.id != self.active_provider]
+            if self.failover
+            else []
+        )
 
 
 class AudioSettings(Strict):
@@ -91,6 +160,11 @@ def load_settings(root: Path | None = None) -> Settings:
     path = root / "config.local.toml"
     data = tomllib.loads(path.read_text()) if path.exists() else {}
     data["paths"] = {"root": root}
+    llm_path = root / ".cache" / "llm.local.json"
+    if llm_path.exists():
+        import json
+
+        data["llm"] = json.loads(llm_path.read_text())
     for section, mapping in {
         "tts": {
             "MODE": "mode",
@@ -104,4 +178,11 @@ def load_settings(root: Path | None = None) -> Settings:
             name = f"SPEAKVIDEO_{section.upper()}_{suffix}"
             if name in os.environ:
                 data.setdefault(section, {})[key] = os.environ[name]
+                if section == "llm" and data[section].get("providers"):
+                    active = data[section].get("active_provider")
+                    for provider in data[section]["providers"]:
+                        if provider["id"] == active:
+                            provider["api_keys" if key == "api_key" else key] = (
+                                [os.environ[name]] if key == "api_key" else os.environ[name]
+                            )
     return Settings.model_validate(data)

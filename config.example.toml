@@ -11,8 +11,8 @@ max_retries = 2
 generation_revision = "qwen3-base-1.7b-v1"
 
 [llm]
-base_url = "https://api.openai.com/v1"
-model = "" # Set to a model offered by your provider.
+base_url = "https://api.stepfun.com/step_plan/v1"
+model = "step-5-preview" # Configure your own key via the editor or SPEAKVIDEO_LLM_API_KEY.
 json_mode = true
 timeout_seconds = 180
 

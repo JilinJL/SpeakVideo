@@ -16,26 +16,53 @@ class LLMProvider(Protocol):
 
 class OpenAICompatibleProvider:
     def __init__(self, settings: LLMSettings):
-        self.settings = settings
+        self.settings = settings.model_copy(deep=True)
+        self.last_endpoint = ""
 
     def complete(self, system: str, user: str, *, json_output: bool = False) -> str:
-        if not self.settings.model:
-            raise ValueError("请配置 SPEAKVIDEO_LLM_MODEL 和供应商 base_url/API key")
-        payload = {
-            "model": self.settings.model,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        }
-        if json_output and self.settings.json_mode:
-            payload["response_format"] = {"type": "json_object"}
-        token = self.settings.api_key.get_secret_value()
-        with httpx.Client(timeout=self.settings.timeout_seconds) as client:
-            response = client.post(
-                self.settings.base_url.rstrip("/") + "/chat/completions",
-                json=payload,
-                headers={"Authorization": f"Bearer {token}"} if token else {},
-            )
-        if response.is_error:
-            raise RuntimeError(f"LLM 返回 HTTP {response.status_code}；请检查供应商配置")
+        endpoints = self.settings.endpoints()
+        if not endpoints:
+            raise ValueError("请在 LLM 配置中启用一个模型供应商")
+        errors = []
+        response = None
+        for endpoint in endpoints:
+            payload = {
+                "model": endpoint.model,
+                "max_tokens": endpoint.max_tokens,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            }
+            if json_output and endpoint.json_mode:
+                payload["response_format"] = {"type": "json_object"}
+            for secret in endpoint.api_keys or [None]:
+                token = secret.get_secret_value() if secret else ""
+                try:
+                    with httpx.Client(timeout=endpoint.timeout_seconds, trust_env=False) as client:
+                        candidate = client.post(
+                            endpoint.base_url.rstrip("/") + "/chat/completions",
+                            json=payload,
+                            headers={"Authorization": f"Bearer {token}"} if token else {},
+                        )
+                except httpx.HTTPError as exc:
+                    errors.append(f"{endpoint.name or endpoint.id}: {type(exc).__name__}")
+                    continue
+                if candidate.is_error:
+                    errors.append(f"{endpoint.name or endpoint.id}: HTTP {candidate.status_code}")
+                    if (
+                        candidate.status_code in {401, 403, 408, 429}
+                        or candidate.status_code >= 500
+                    ):
+                        continue
+                    raise RuntimeError("LLM 请求参数被拒绝；" + errors[-1])
+                response = candidate
+                self.last_endpoint = f"{endpoint.name or endpoint.id} / {endpoint.model}"
+                break
+            if response is not None:
+                break
+        if response is None:
+            raise RuntimeError("LLM 连接失败；" + "；".join(errors))
         choice = response.json()["choices"][0]
         if choice.get("finish_reason") in {"length", "content_filter"}:
             raise ValueError("LLM 输出被截断或拒绝，本次剧本未保存")

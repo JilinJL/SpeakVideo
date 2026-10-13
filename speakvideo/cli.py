@@ -56,7 +56,7 @@ def doctor():
             "tts": health,
             "ffmpeg": shutil.which("ffmpeg"),
             "ffprobe": shutil.which("ffprobe"),
-            "llm_configured": bool(s.llm.model),
+            "llm_configured": bool(s.llm.endpoints()),
             "voices": VoiceStore(s).index(),
         }
     )

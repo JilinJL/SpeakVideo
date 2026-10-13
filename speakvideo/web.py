@@ -5,20 +5,25 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .audio import audio_current, build_audio
 from .config import Settings
+from .connections import connection_status
 from .jobs import report, synthesize
+from .llm_config import public_llm, save_llm
+from .processing import ffmpeg
 from .project import Project
+from .script.engine import OpenAICompatibleProvider
 from .script.moods import MOOD_LABELS
 from .script.schema import Script, VoiceBinding, validate_ids
 from .storage import atomic_bytes, lock, read_json, write_json
-from .tts.client import TTSClient
+from .tts.client import TTSClient, wav_info
 from .voices import VoiceStore
 from .workflow import advance, generate_brief, generate_script
 
@@ -52,6 +57,13 @@ class VoiceAction(BaseModel):
     instruct: str = ""
     reference_id: str = ""
     overwrite: bool = False
+
+
+class VoiceEdit(BaseModel):
+    role: str
+    emotion: str
+    ref_text: str = ""
+    notes: str = ""
 
 
 def create_app(settings: Settings) -> FastAPI:
@@ -142,12 +154,112 @@ def create_app(settings: Settings) -> FastAPI:
             "moods": MOOD_LABELS,
             "tts_mode": settings.tts.mode,
             "tts_url": settings.tts.base_url,
-            "llm_configured": bool(settings.llm.model),
+            "llm_configured": bool(settings.llm.endpoints()),
         }
+
+    @app.get("/api/connections")
+    def connections():
+        return connection_status(settings)
+
+    @app.get("/api/llm/config")
+    def llm_configuration():
+        return public_llm(settings.llm)
+
+    @app.put("/api/llm/config")
+    def llm_edit(body: dict):
+        try:
+            return save_llm(settings, body)
+        except ValidationError as exc:
+            # Do not echo credentials from Pydantic's input_value diagnostics.
+            raise ValueError(
+                "；".join(
+                    f"{'.'.join(map(str, e['loc']))}: {e['msg']}"
+                    for e in exc.errors(include_input=False)
+                )
+            ) from None
+
+    @app.post("/api/llm/test")
+    def llm_test(body: dict):
+        snapshot = settings.llm.model_copy(deep=True)
+        if body.get("provider_id"):
+            snapshot.active_provider = body["provider_id"]
+            snapshot.failover = False
+
+        def execute(cancelled):
+            provider = OpenAICompatibleProvider(snapshot)
+            answer = provider.complete("你是连接测试助手。", "仅回答：LLM 连接成功。")
+            return f"{provider.last_endpoint}：{answer}"
+
+        return submit("llm_test", execute)
 
     @app.get("/api/voices")
     def voices():
         return VoiceStore(settings).list_roles()
+
+    def mutable_voice():
+        if any(
+            t["status"] in {"queued", "running"}
+            and t["label"] in {"sync", "create", "design", "preview", "synth", "retry", "run"}
+            for t in tasks.values()
+        ):
+            raise HTTPException(409, "配音或音色任务运行中，请完成或暂停后再编辑音色")
+
+    @app.get("/api/voices/assets")
+    def voice_assets():
+        return VoiceStore(settings).details()
+
+    @app.post("/api/voices/import")
+    async def import_voice(
+        file: UploadFile = File(...),
+        role: str = Form(...),
+        emotion: str = Form(...),
+        overwrite: bool = Form(False),
+        ref_text: str | None = Form(None),
+        notes: str | None = Form(None),
+    ):
+        mutable_voice()
+        if Path(file.filename or "").suffix.lower() != ".pt":
+            raise ValueError("请选择 PT 文件")
+        content = await file.read(32 * 1024 * 1024 + 1)
+        with lock(settings.paths.cache / "gpu.lock"):
+            return VoiceStore(settings).import_pt(
+                role, emotion, content, overwrite, ref_text, notes
+            )
+
+    @app.get("/api/voices/trash")
+    def voice_trash():
+        return VoiceStore(settings).trash()
+
+    @app.post("/api/voices/trash/{key}/restore")
+    def restore_voice(key: str):
+        mutable_voice()
+        with lock(settings.paths.cache / "gpu.lock"):
+            return VoiceStore(settings).restore(key)
+
+    @app.get("/api/voices/assets/{role}/{emotion}")
+    def voice_detail(role: str, emotion: str):
+        return VoiceStore(settings).detail(role, emotion)
+
+    @app.get("/api/voices/assets/{role}/{emotion}/download")
+    def download_voice(role: str, emotion: str):
+        store = VoiceStore(settings)
+        store.detail(role, emotion)
+        path = store.path(role, emotion)
+        return FileResponse(path, media_type="application/octet-stream", filename=path.name)
+
+    @app.put("/api/voices/assets/{role}/{emotion}")
+    def edit_voice(role: str, emotion: str, body: VoiceEdit):
+        mutable_voice()
+        with lock(settings.paths.cache / "gpu.lock"):
+            return VoiceStore(settings).edit(
+                role, emotion, body.role, body.emotion, body.ref_text, body.notes
+            )
+
+    @app.delete("/api/voices/assets/{role}/{emotion}")
+    def delete_voice(role: str, emotion: str):
+        mutable_voice()
+        with lock(settings.paths.cache / "gpu.lock"):
+            return VoiceStore(settings).delete(role, emotion)
 
     @app.get("/api/projects")
     def projects():
@@ -263,9 +375,47 @@ def create_app(settings: Settings) -> FastAPI:
         content = await file.read(50 * 1024 * 1024 + 1)
         if len(content) > 50 * 1024 * 1024:
             raise ValueError("参考音频上限 50 MB")
-        key = uuid.uuid4().hex + suffix
-        atomic_bytes(settings.paths.cache / key, content)
-        return {"reference_id": key}
+        if not content:
+            raise ValueError("参考音频为空")
+        stem = uuid.uuid4().hex
+        source, target = (
+            settings.paths.cache / (stem + ".upload" + suffix),
+            settings.paths.cache / (stem + ".wav"),
+        )
+        atomic_bytes(source, content)
+        try:
+            # MediaRecorder on Safari/Chromium emits mp4/webm; Qwen expects PCM WAV.
+            await run_in_threadpool(
+                ffmpeg,
+                [
+                    "-i",
+                    source,
+                    "-t",
+                    "121",
+                    "-vn",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "24000",
+                    "-c:a",
+                    "pcm_s16le",
+                    target,
+                ],
+                timeout=60,
+            )
+            _, duration = wav_info(target.read_bytes())
+            if duration > 120:
+                raise ValueError("参考音频请控制在 120 秒以内")
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+        finally:
+            source.unlink(missing_ok=True)
+        return {
+            "reference_id": target.name,
+            "duration": round(duration, 2),
+            "preview_url": f"/api/previews/{target.name}",
+        }
 
     @app.post("/api/voices/actions")
     def voice_action(body: VoiceAction):
@@ -281,6 +431,33 @@ def create_app(settings: Settings) -> FastAPI:
                         settings.paths.cache / (key + ".json"),
                         {"text": body.text, "instruct": body.instruct},
                     )
+                    return key
+                if body.action == "preview":
+                    if not body.text.strip():
+                        raise ValueError("请填写试听台词")
+                    store = VoiceStore(settings)
+                    store.detail(body.role, body.emotion)
+                    store.verify_remote(client, {(body.role, body.emotion)})
+                    if client.mode == "gateway":
+                        from .storage import sha256
+
+                        job = client.submit(
+                            {
+                                "text": body.text,
+                                "role": body.role,
+                                "emotion": body.emotion,
+                                "language": "Chinese",
+                                "voice_sha256": sha256(store.path(body.role, body.emotion)),
+                            },
+                            "preview-" + uuid.uuid4().hex,
+                        )
+                        result = client.wait_job(job, cancelled)
+                    else:
+                        result = client.synthesize(
+                            text=body.text, role=body.role, emotion=body.emotion
+                        )
+                    key = uuid.uuid4().hex + ".wav"
+                    atomic_bytes(settings.paths.cache / key, result.wav_bytes)
                     return key
                 if body.action == "create":
                     # Only use a previously uploaded/generated reference, never arbitrary local paths.
