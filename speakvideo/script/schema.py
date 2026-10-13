@@ -49,6 +49,15 @@ class ScriptLine(BaseModel):
         return v
 
 
+class ScriptPrompts(BaseModel):
+    """Per-project writing overrides. Empty values use the current defaults."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    brief: str = Field(default="", max_length=20000)
+    structure: str = Field(default="", max_length=20000)
+
+
 class ScriptMeta(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -56,6 +65,7 @@ class ScriptMeta(BaseModel):
     keywords: list[str] = Field(default_factory=list)
     brief: str = ""
     guidance: str = ""
+    prompts: ScriptPrompts = Field(default_factory=ScriptPrompts)
 
 
 class Script(BaseModel):
@@ -73,6 +83,51 @@ class Script(BaseModel):
         if v != SCHEMA_VERSION:
             raise ValueError(f"仅支持 schema_version={SCHEMA_VERSION}，收到 {v}")
         return v
+
+
+class GeneratedMeta(BaseModel):
+    """The provider must leave metadata to the workbench."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class GeneratedCastMember(CastMember):
+    slot: Literal["p1", "p2"]
+    persona: str = Field(max_length=2000)
+
+
+class GeneratedLine(ScriptLine):
+    """LLM output requires every field; saved scripts keep their legacy defaults."""
+
+    id: str = Field(min_length=1, max_length=30, pattern=r"^[A-Za-z0-9_-]+$")
+    slot: Literal["p1", "p2"]
+    words: str = Field(min_length=3, max_length=200)
+
+    @field_validator("words", mode="before")
+    @classmethod
+    def _strip_words(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    mood: str = Field(json_schema_extra={"enum": list(MOODS)})
+    pause_after_ms: int = Field(ge=0, le=10000)
+
+
+class GeneratedScript(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1.0"]
+    template: TemplateName
+    meta: GeneratedMeta
+    cast: list[GeneratedCastMember] = Field(min_length=2, max_length=2)
+    lines: list[GeneratedLine] = Field(min_length=1)
+
+    @classmethod
+    def response_schema(cls, max_line_chars: int) -> dict[str, Any]:
+        if not 3 <= max_line_chars <= 200:
+            raise ValueError("单行台词上限必须为 3–200 字")
+        schema = cls.model_json_schema()
+        schema["$defs"]["GeneratedLine"]["properties"]["words"]["maxLength"] = max_line_chars
+        return schema
 
 
 class VoiceBinding(BaseModel):
@@ -100,8 +155,9 @@ def validate_ids(script: Script) -> list[str]:
     if len(known) != len(script.cast):
         problems.append("cast.slot 重复")
     for line in script.lines:
-        if not line.words.strip():
-            problems.append(f"{line.id} 台词为空")
+        length = len(line.words.strip())
+        if length < 3 or length > 200:
+            problems.append(f"{line.id} 台词 {length} 字，必须为 3–200 字")
         if line.id in seen:
             problems.append(f"line.id 重复: {line.id}")
         seen.add(line.id)

@@ -100,10 +100,74 @@ class TTSClient:
             )
         return response
 
-    def health(self) -> dict:
+    def health(self, include_docs: bool = False) -> dict:
         if self.mode == "demo":
             return {"ready": True, "mode": "demo", "notice": "测试音，不是真实配音"}
-        return self._request("GET", "/api/health" if self.mode == "direct" else "/v1/health").json()
+        path = "/api/health" if self.mode == "direct" else "/v1/health"
+        params = {"include_docs": str(include_docs).lower()} if self.mode == "gateway" else {}
+        try:
+            return self._request("GET", path, params=params).json()
+        except TTSError as exc:
+            # A connected worker with a loading model is different from an offline agent.
+            detail = exc.detail
+            if (
+                exc.status_code == 503
+                and isinstance(detail, dict)
+                and (detail.get("worker_connected") is True or "capabilities" in detail)
+            ):
+                return detail
+            raise
+
+    def capabilities(self) -> dict:
+        if self.mode != "gateway":
+            return {
+                "available": False,
+                "source": self.mode,
+                "message": "当前模式不使用 Windows Agent",
+            }
+        source = "worker.capabilities"
+        try:
+            envelope = self._request("GET", "/v1/worker/capabilities", timeout=12).json()
+            document = envelope.get("result", envelope)
+        except TTSError as exc:
+            if exc.status_code not in {404, 405, 501}:
+                raise
+            source = "worker.health"
+            document = self.health(include_docs=True).get("interface_docs")
+        if document is None:
+            return {
+                "available": False,
+                "source": source,
+                "message": "Windows 未提供接口文档，请升级 Agent",
+            }
+        if not isinstance(document, dict) or document.get("schema") != (
+            "speakvideo.windows-agent.interface-document"
+        ):
+            raise TTSError("Windows 接口文档格式无效")
+        if document.get("protocol") != "1" or document.get("schema_version") != "1.0":
+            raise TTSError("Windows 接口文档版本不兼容，请更新 Mac 与 Agent")
+        if document.get("worker_id") != self.settings.tts.worker_id:
+            raise TTSError("Windows 接口文档的 Worker ID 与配置不一致")
+        rpc, actions, limits = (document.get(k) for k in ("rpc", "voice_manage_actions", "limits"))
+        if (
+            not isinstance(rpc, list)
+            or not all(isinstance(v, dict) for v in rpc)
+            or not (isinstance(actions, dict) and isinstance(limits, dict))
+        ):
+            raise TTSError("Windows 接口文档缺少 RPC、音色操作或限制")
+        return {
+            "available": True,
+            "source": source,
+            "document": document,
+            "rpc": [
+                v["type"]
+                for v in rpc
+                if v.get("implemented") is True and isinstance(v.get("type"), str)
+            ],
+            "voice_actions": list(actions),
+            "limits": limits,
+            "gateway_capabilities": source == "worker.capabilities",
+        }
 
     def list_roles(self) -> dict[str, list[str]]:
         if self.mode == "demo":
@@ -116,6 +180,33 @@ class TTSClient:
     def download_pt(self, role: str, emotion: str) -> bytes:
         path = "/api/pt/download" if self.mode == "direct" else "/v1/voices/download"
         return self._request("GET", path, params={"role": role, "emotion": emotion}).content
+
+    def delete_pt(self, role: str, emotion: str, digest: str) -> dict:
+        if self.mode == "demo":
+            return {"deleted": True, "mode": "demo"}
+        if self.mode != "gateway":
+            raise TTSError("远端删除需要 SpeakVideo Windows Agent；Qwen 原生接口没有此功能")
+        result = self._request(
+            "DELETE", "/v1/voices", json={"role": role, "emotion": emotion, "sha256": digest}
+        ).json()
+        if result.get("deleted") is not True:
+            raise TTSError("Windows 未确认 PT 删除")
+        return result
+
+    def manage_voices(self, action: str, **values) -> dict:
+        if self.mode != "gateway":
+            raise TTSError("远端资产接口仅适用于 Windows 网关模式")
+        try:
+            result = self._request(
+                "POST", "/v1/voices/manage", json={"action": action, **values}
+            ).json()
+            return result
+        except TTSError as exc:
+            if exc.status_code == 404:
+                raise TTSError(
+                    "Gateway 缺少 PT 管理路由，请升级网关；Windows 是否支持编辑请查看接口文档", 404
+                ) from None
+            raise
 
     def sync_voices(self, assets: list[tuple[str, str, bytes]]) -> dict:
         if self.mode != "gateway":
@@ -153,8 +244,6 @@ class TTSClient:
     def create_pt(
         self, *, reference: Path, role: str, emotion: str, ref_text: str, overwrite: bool = False
     ) -> dict:
-        if not ref_text.strip():
-            raise ValueError("ICL 音色固化必须提供对应台词 ref_text")
         payload = dict(role=role, emotion=emotion, ref_text=ref_text, overwrite=overwrite)
         if self.mode == "gateway":
             import json

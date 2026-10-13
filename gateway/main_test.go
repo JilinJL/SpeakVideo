@@ -75,7 +75,18 @@ func TestWorkerRoutingAndJobs(t *testing.T) {
 			}
 			switch str(m, "type") {
 			case "worker.health":
-				_ = c.WriteJSON(message{"request_id": m["request_id"], "ready": true, "worker_id": "example-worker"})
+				reply := message{"type": "rpc.result", "request_id": m["request_id"], "ready": true, "worker_id": "example-worker"}
+				if m["include_docs"] == true {
+					reply["interface_docs"] = message{"protocol": "1"}
+				}
+				_ = c.WriteJSON(reply)
+			case "worker.capabilities":
+				_ = c.WriteJSON(message{"type": "rpc.result", "request_id": "stale-request", "result": message{"protocol": "wrong"}})
+				_ = c.WriteJSON(message{"type": "rpc.result", "request_id": m["request_id"], "result": message{"protocol": "1", "worker_id": "example-worker"}})
+			case "voice.manage":
+				_ = c.WriteJSON(message{"request_id": m["request_id"], "result": m["payload"]})
+			case "worker.metrics":
+				_ = c.WriteJSON(message{"request_id": m["request_id"], "result": message{"queue_depth": 3, "current_job_id": "actual-job"}})
 			case "job.submit":
 				job := message(m["job"].(map[string]any))
 				id := str(job, "job_id")
@@ -114,6 +125,31 @@ func TestWorkerRoutingAndJobs(t *testing.T) {
 	code, m := request(t, s, "GET", "/v1/health", "")
 	if code != 200 || m["ready"] != true {
 		t.Fatal(code, m)
+	}
+	code, m = request(t, s, "GET", "/v1/health?include_docs=false", "")
+	if code != 200 || m["worker_connected"] != true || m["interface_docs"] != nil {
+		t.Fatal("health docs flag was lost", code, m)
+	}
+	code, m = request(t, s, "GET", "/v1/worker/capabilities", "")
+	if code != 200 || str(m, "type") != "rpc.result" || str(m, "request_id") == "" || m["result"].(map[string]any)["protocol"] != "1" {
+		t.Fatal("capability RPC correlation was lost", code, m)
+	}
+	deletion := `{"action":"delete","role":"讲述者","emotion":"平静","sha256":"` + strings.Repeat("a", 64) + `"}`
+	code, m = request(t, s, "POST", "/v1/voices/manage", deletion)
+	if code != 200 || str(m, "action") != "delete" || str(m, "role") != "讲述者" || str(m, "sha256") != strings.Repeat("a", 64) {
+		t.Fatal("management request lost parameters", code, m)
+	}
+	code, m = request(t, s, "GET", "/v1/worker/metrics", "")
+	if code != 200 || m["queue_depth"] != float64(3) || str(m, "current_job_id") != "actual-job" {
+		t.Fatal("metrics routing", code, m)
+	}
+	code, _ = request(t, s, "POST", "/v1/voices/manage", `{"action":"erase-everything"}`)
+	if code != 400 {
+		t.Fatal("invalid voice action accepted", code)
+	}
+	code, _ = request(t, s, "DELETE", "/v1/voices", `{"role":"../outside","emotion":"平静"}`)
+	if code != 400 {
+		t.Fatal("invalid legacy deletion accepted", code)
 	}
 	body := `{"text":"你好","role":"讲述者","emotion":"平静","voice_sha256":"` + strings.Repeat("a", 64) + `"}`
 	code, m = request(t, s, "POST", "/v1/tts/jobs", body)

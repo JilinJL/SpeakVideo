@@ -70,7 +70,11 @@ def test_interrupted_synthesis_only_retries_missing_line(project, monkeypatch):
 def test_gateway_poll_resume_does_not_resubmit(project, monkeypatch):
     with TTSClient(project.settings) as c:
         audio = c.synthesize(text="test", role="讲述者")
+    assets = VoiceStore(project.settings).assets()
     project.settings.tts.mode = "gateway"
+    for role, emotion, content in assets:
+        atomic_bytes(VoiceStore(project.settings).path(role, emotion), content)
+    monkeypatch.setattr(VoiceStore, "remote_inventory", lambda self, client: self.details())
     monkeypatch.setattr(TTSClient, "health", lambda self: {"ready": True})
     monkeypatch.setattr(VoiceStore, "verify_remote", lambda *args: None)
     submissions = []
@@ -91,7 +95,11 @@ def test_gateway_poll_resume_does_not_resubmit(project, monkeypatch):
 
 
 def test_gateway_lost_submit_ack_reuses_idempotency_key(project, monkeypatch):
+    assets = VoiceStore(project.settings).assets()
     project.settings.tts.mode = "gateway"
+    for role, emotion, content in assets:
+        atomic_bytes(VoiceStore(project.settings).path(role, emotion), content)
+    monkeypatch.setattr(VoiceStore, "remote_inventory", lambda self, client: self.details())
     monkeypatch.setattr(TTSClient, "health", lambda self: {"ready": True})
     monkeypatch.setattr(VoiceStore, "verify_remote", lambda *args: None)
     keys = []

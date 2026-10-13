@@ -12,17 +12,25 @@ import base64
 import hashlib
 import json
 import re
+from collections import deque
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
 from filelock import FileLock
 
 if __package__:
-    from .base_agent import Agent, QwenClient, load_agent_settings
+    from .base_agent import Agent, QwenClient, load_agent_settings, sync_voice_files
+    from .interface_docs import build_interface_document
     from .journal import Journal
+    from .metrics import snapshot
+    from .voice_library import VoiceLibrary
 else:
-    from base_agent import Agent, QwenClient, load_agent_settings
+    from base_agent import Agent, QwenClient, load_agent_settings, sync_voice_files
+    from interface_docs import build_interface_document
     from journal import Journal
+    from metrics import snapshot
+    from voice_library import VoiceLibrary
 
 NAME = re.compile(r"^[\w-]{1,64}$")
 ID = re.compile(r"^j_[a-f0-9]{64}$")
@@ -39,6 +47,21 @@ def voice_path(root: Path, role: str, emotion: str) -> Path:
     return path
 
 
+def delete_voice_file(root: Path, role: str, emotion: str, digest: str) -> dict:
+    path = voice_path(root, role, emotion)
+    if not SHA.fullmatch(digest):
+        raise ValueError("invalid expected voice SHA256")
+    if not path.exists():
+        return {"deleted": True, "permanent": True, "already_missing": True}
+    if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        raise ValueError("voice SHA256 changed; refusing to delete a different PT")
+    for suffix in (".pt", ".json", ".wav"):
+        path.with_suffix(suffix).unlink(missing_ok=True)
+    if not any(path.parent.iterdir()):
+        path.parent.rmdir()
+    return {"deleted": True, "permanent": True, "sha256": digest}
+
+
 class VerifiedQwen:
     def __init__(self, agent, client):
         self.agent, self.client = agent, client
@@ -52,7 +75,9 @@ class VerifiedQwen:
             payload = row["payload"]
             path = voice_path(self.agent.settings.root, payload["role"], payload["emotion"])
             if hashlib.sha256(path.read_bytes()).hexdigest() != payload["voice_sha256"]:
-                raise ValueError("voice_sha256 mismatch; sync the Mac source before retrying")
+                raise ValueError(
+                    "voice_sha256 mismatch; refresh the Windows library before retrying"
+                )
             return await self.client.synthesize(job)
 
 
@@ -62,9 +87,16 @@ class SpeakVideoAgent(Agent):
         self.journal = Journal(settings.root / ".speakvideo" / "jobs.sqlite3")
         self.asset_lock = asyncio.Lock()
         self.qwen = VerifiedQwen(self, self.qwen)
+        self.current_job_id = ""
+        self.runtime_events = deque(maxlen=50)
 
     async def emit(self, event):
+        if event.get("type", "").startswith("job."):
+            self.runtime_events.append(
+                f"{datetime.now(UTC).isoformat()} {event['type']} {event.get('job_id', '')} {event.get('status', '')}"
+            )
         if event.get("type") == "job.running":
+            self.current_job_id = event["job_id"]
             self.journal.update(event["job_id"], "running")
         await super().emit(event)
 
@@ -119,6 +151,8 @@ class SpeakVideoAgent(Agent):
 
     def remember_result(self, event):
         job_id = event["job_id"]
+        if self.current_job_id == job_id:
+            self.current_job_id = ""
         self.journal.update(job_id, event["status"], event.get("error", ""))
         self._completed[job_id] = dict(event)
         self._known_jobs.discard(job_id)
@@ -139,7 +173,13 @@ class SpeakVideoAgent(Agent):
         kind = message["type"]
         response = {"type": "rpc.result", "request_id": message.get("request_id", "")}
         try:
-            if kind == "job.query":
+            if kind == "worker.capabilities":
+                response["result"] = build_interface_document(self.settings.worker_id)
+            elif kind == "worker.metrics":
+                response["result"] = await asyncio.to_thread(
+                    snapshot, self.jobs.qsize(), self.current_job_id, list(self.runtime_events)
+                )
+            elif kind == "job.query":
                 job_id = message.get("job_id", "")
                 row = self.journal.get(job_id)
                 response.update(job_id=job_id, status="missing" if row is None else row["status"])
@@ -156,6 +196,21 @@ class SpeakVideoAgent(Agent):
                 if not data or len(data) > 32 * 1024 * 1024:
                     raise ValueError("PT file exceeds gateway limit")
                 response["content_base64"] = base64.b64encode(data).decode()
+            elif kind == "voice.delete":
+                async with self.asset_lock:
+                    response["result"] = await asyncio.to_thread(
+                        delete_voice_file,
+                        self.settings.root,
+                        message["role"],
+                        message["emotion"],
+                        message["sha256"],
+                    )
+            elif kind == "voice.manage":
+                async with self.asset_lock:
+                    response["result"] = await asyncio.to_thread(
+                        VoiceLibrary(self.settings.root, sync_voice_files).manage,
+                        message["payload"],
+                    )
             else:
                 async with httpx.AsyncClient(
                     base_url=self.settings.qwen_url,
@@ -167,7 +222,20 @@ class SpeakVideoAgent(Agent):
                     if kind == "worker.health":
                         result = await client.get("/api/health")
                         result.raise_for_status()
-                        response.update(result.json(), worker_id=self.settings.worker_id)
+                        response.update(
+                            result.json(),
+                            worker_id=self.settings.worker_id,
+                            capabilities={
+                                "voice_manage": True,
+                                "voice_reference": True,
+                                "metrics": True,
+                                "interface_docs": True,
+                            },
+                        )
+                        if message.get("include_docs", True):
+                            response["interface_docs"] = build_interface_document(
+                                self.settings.worker_id
+                            )
                     elif kind == "voice.list":
                         result = await client.get("/api/pt/list")
                         result.raise_for_status()
@@ -179,10 +247,17 @@ class SpeakVideoAgent(Agent):
                             ref_audio_base64=message["content_base64"],
                         )
                         async with self.asset_lock:
+                            library = VoiceLibrary(self.settings.root, sync_voice_files)
                             result = await client.post("/api/pt/create", json=payload)
                             if result.is_error:
                                 raise ValueError(result.text[:1000])
                             response["result"] = result.json()
+                            library.save_reference(
+                                payload["role"],
+                                payload["emotion"],
+                                base64.b64decode(message["content_base64"], validate=True),
+                                payload.get("ref_text", ""),
+                            )
                     elif kind == "voice.design":
                         payload = dict(
                             message["payload"], persist=False, mode="file", allow_download=False
@@ -204,9 +279,13 @@ class SpeakVideoAgent(Agent):
     async def handle_message(self, message):
         if message.get("type") in {
             "worker.health",
+            "worker.capabilities",
+            "worker.metrics",
             "job.query",
             "voice.list",
             "voice.download",
+            "voice.delete",
+            "voice.manage",
             "voice.create",
             "voice.design",
         }:
@@ -252,6 +331,7 @@ class SpeakVideoAgent(Agent):
                             "durable_jobs": True,
                             "rpc": True,
                             "correlated_acks": True,
+                            "interface_docs": True,
                         },
                     }
                 )

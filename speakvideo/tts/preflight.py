@@ -25,7 +25,7 @@ def preflight(
     cast: CastBinding,
     client: TTSClient,
     *,
-    max_line_chars: int = 100,
+    max_line_chars: int = 200,
     done_ids: set[str] | None = None,
     check_remote: bool = True,
 ) -> PreflightReport:

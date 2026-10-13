@@ -25,6 +25,7 @@ def connection_status(settings: Settings) -> dict:
             worker="connected",
             model=health.get("model", ""),
             device=health.get("device", ""),
+            capabilities=health.get("capabilities", {}),
             message="配音服务已就绪" if health.get("ready") else "已连接，模型尚未就绪",
         )
         if settings.tts.mode == "demo":
@@ -33,8 +34,16 @@ def connection_status(settings: Settings) -> dict:
         code = exc.status_code
         result.update(
             gateway="connected" if code else "unreachable",
-            worker="offline" if code == 503 else "unknown",
+            worker="offline"
+            if code == 503
+            and isinstance(exc.detail, dict)
+            and exc.detail.get("worker_connected") is False
+            else "unknown",
             message="Windows Agent 离线，请确认 Windows 已开机且 SpeakVideoTtsAgent 正在运行"
+            if code == 503
+            and isinstance(exc.detail, dict)
+            and exc.detail.get("worker_connected") is False
+            else "Windows 连接或模型健康检查失败：" + str(exc)
             if code == 503
             else "网关认证失败，请检查 Client Token"
             if code in {401, 403}

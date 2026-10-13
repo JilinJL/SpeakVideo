@@ -38,6 +38,7 @@ class TTSSettings(Strict):
     poll_interval_seconds: float = Field(default=1, gt=0)
     max_retries: int = Field(default=2, ge=0, le=10)
     generation_revision: str = "qwen3-base-1.7b-v1"
+    local_pt_root: Path | None = None
 
 
 class LLMEndpoint(Strict):
@@ -131,13 +132,13 @@ class AudioSettings(Strict):
 
 
 class ScriptSettings(Strict):
-    max_line_chars: int = Field(default=100, ge=1, le=10000)
+    max_line_chars: int = Field(default=200, ge=3, le=200)
     default_template: str = "duo_dialogue"
 
 
 class VideoSettings(Strict):
-    width: int = Field(default=1920, ge=320, multiple_of=2)
-    height: int = Field(default=1080, ge=240, multiple_of=2)
+    width: int = Field(default=1080, ge=320, multiple_of=2)
+    height: int = Field(default=1920, ge=240, multiple_of=2)
     fps: int = Field(default=30, ge=1, le=60)
     bgm_volume: float = Field(default=0.18, ge=0, le=1)
 
@@ -160,6 +161,12 @@ def load_settings(root: Path | None = None) -> Settings:
     path = root / "config.local.toml"
     data = tomllib.loads(path.read_text()) if path.exists() else {}
     data["paths"] = {"root": root}
+    mode_path = root / ".cache" / "tts-mode.json"
+    if mode_path.exists():
+        import json
+
+        modes = json.loads(mode_path.read_text())
+        data["tts"] = modes[modes["active"]]
     llm_path = root / ".cache" / "llm.local.json"
     if llm_path.exists():
         import json

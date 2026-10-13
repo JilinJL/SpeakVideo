@@ -1,12 +1,16 @@
-# P6 网关接口契约（已部署 v1）
+# P6 网关接口契约（protocol 1 · 2026-10-13 更新）
 
 此契约由 `gateway/` Go 服务和 `worker/` Windows 扩展实现。现网 HTTPS 地址为 `https://tts.example.com`，worker 为 `example-worker`。网关只做鉴权与内存转发，作业元数据与 `.pt` 副本由 Windows agent 管理。接入需 `tts.mode="gateway"`、Client Token 与 `worker_id`，不只是修改 `base_url`。
 
-所有客户端接口使用 HTTPS、`Authorization: Bearer <CLIENT_TOKEN>` 和 `X-Worker-ID: example-worker`，错误使用非 2xx + JSON `detail`。Worker Token 独立，只能连接 WSS worker 路由。所有音频响应为有效 PCM WAV，TTS 采样率 24000。请求体上限 32MiB，WAV 上限 64MiB，最多八个并发 HTTP 请求；单 GPU 串行。
+所有客户端接口使用 HTTPS、`Authorization: Bearer <CLIENT_TOKEN>` 和 `X-Worker-ID: example-worker`，错误使用非 2xx + JSON `detail`。Worker Token 独立，只能连接 WSS worker 路由。所有音频响应为有效 PCM WAV，TTS 采样率 24000。普通请求体上限 32MiB，PT 管理 JSON 上限 48MiB（原始 PT ≤32MiB，base64 约 43MiB）；nginx 上限 48MiB。WAV 上限 64MiB，最多八个并发 HTTP 请求；单 GPU 串行。
 
 ## 健康与音色
 
-- `GET /v1/health` → `{"ready": true}`。执行器不在线时必须返回非就绪。
+- `GET /v1/health?include_docs=false` → readiness、worker_connected、模型、设备和布尔 capabilities。`include_docs` 默认 true，按需附完整接口文档。503 且 worker_connected=true 表示 Agent 连通但模型未就绪/检查失败；false 表示 Worker 未连接。
+- `GET /v1/worker/capabilities` → 原样 `rpc.result` 信封，保留 `request_id`，接口文档在 `result`。没有开放任意 RPC 透传，仅转发 `worker.capabilities`。
+- `GET /v1/worker/metrics` → CPU、内存、GPU、队列及最近事件；无需模型 ready=true。
+- `POST /v1/voices/manage` → JSON `{action,...}`，允许 list/import/edit/delete_permanent/reference。返回 Windows 的 action 结果；永久删除需要 `permanent:true` 回执，不再提供回收站恢复。
+- `DELETE /v1/voices` → 兼容旧删除队列，要求 role/emotion/sha256。
 - `GET /v1/voices` → `{"roles": {"示例角色": ["平静"]}}`。
 - `GET /v1/voices/download?role=示例角色&emotion=平静` → `.pt` 原始字节。
 - `POST /v1/voices/sync` → multipart 字段 `bundle`，ZIP（内存构造）。ZIP 包含 `manifest.json` 与 `{role}/{role}_{emotion}.pt`。manifest 是数组：
@@ -21,11 +25,11 @@ Windows 校验路径、哈希和 Qwen prompt 结构，原子落盘，再回复�
 {"voices":[{"role":"示例角色","emotion":"平静","sha256":"<sha256>"}]}
 ```
 
-Mac 只在确认接收哈希一致后提交配音。同步所需音色子集，不需要删除其他副本。加载时也需要确保 pt 与 Python / torch / qwen_tts 版本兼容，校验失败应返回具体错误；Mac 不执行 torch.load。
+sync 保留给兼容客户端；当前 Mac 默认拉取 Windows 清单和 PT，提交前核对远端哈希，不自动推送本机旧音色。加载时也需要确保 pt 与 Python / torch / qwen_tts 版本兼容，校验失败应返回具体错误；Mac 不执行 torch.load。
 
 ## 音色生产
 
-- `POST /v1/voices/create`：multipart `file` 为参考音频，`metadata` 为 JSON 字符串，字段 `role/emotion/ref_text/overwrite`。Windows 在内存接收音频、调用 clone prompt、保存 pt 副本，返回 JSON 成功信息。Mac 再调用 download，保存到自己的主资产目录。
+- `POST /v1/voices/create`：multipart `file` 为参考音频，`metadata` 为 JSON 字符串，字段 `role/emotion/ref_text/overwrite`。Windows 在内存接收音频、调用 clone prompt、保存 pt 副本，返回 JSON 成功信息。Mac 再调用 download，保存到经过哈希校验的缓存目录。Windows 管理 PT 主资产。
 - `POST /v1/voices/design`：JSON `text/instruct/language/mode="file"/allow_download=false`，响应 WAV 字节；不自动固化。Mac 保存试听音频，用户确认后调用 create。
 
 这两个接口通过 agent RPC 适配。Qwen 的内存补丁接收 `ref_audio_base64`，直接解码为数组 / 采样率，不把 Mac 路径传给 Windows，也不上传临时参考音频文件。音色设计使用 `persist=false`；本地设计模型缺失时明确失败，不擅自下载。
@@ -68,6 +72,6 @@ Mac 的暂停停止继续提交与轮询，不调用 cancel。Windows 队列串�
 
 - 既有事件：`job.submit {job:{...}}` → `job.accepted/job.rejected/job.running/job.result`；`voice.sync {sync_id,files:[{path,sha256,content_base64}]}` → `voice.sync.result`。
 - 每次 job.submit 另带随机 request_id，accepted/rejected 必须原样回传；稳定 job_id 用于幂等，request_id 用于本次确认。迟到确认不能匹配新的提交。
-- 扩展 RPC：`worker.health`、`job.query`、`voice.list/download/create/design`，每次带随机 `request_id`，返回 `rpc.result`。RPC 失败使用 `rpc_error`，任务失败仍是合法的 `status="failed",error=...` 查询结果。
+- 扩展 RPC：`worker.capabilities`、`worker.health`、`worker.metrics`、`job.query`、`voice.list/download/create/design/delete/manage`，每次带随机 `request_id`，返回 `rpc.result`。RPC 失败使用 `rpc_error`，任务失败仍是合法的 `status="failed",error=...` 查询结果。
 - `job.query include_audio=true` 才返回 base64 WAV，网关解码后直接写 HTTP 响应；状态轮询不携带音频。
 - WebSocket ping/pong 保活，不输出 Token、台词或音频数据到网关日志。

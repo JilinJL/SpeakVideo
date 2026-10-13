@@ -16,7 +16,7 @@ from .workflow import advance, generate_brief, generate_script
 
 app = typer.Typer(help="SpeakVideo · Mac 对谈音频工作台", no_args_is_help=True)
 voices = typer.Typer(help="本地音色工厂与同步")
-script = typer.Typer(help="编剧阐述、结构化与验证")
+script = typer.Typer(help="对话草稿、台词生成与验证")
 app.add_typer(voices, name="voices")
 app.add_typer(script, name="script")
 
@@ -76,7 +76,7 @@ def tts(text: str, role: str, emotion: str = "平静", output: Path = Path("prev
 @voices.command("list")
 def voice_list(remote: bool = False):
     s = load_settings()
-    if remote:
+    if remote or s.tts.mode == "gateway":
         with TTSClient(s) as c:
             show(c.list_roles())
     else:
@@ -85,14 +85,33 @@ def voice_list(remote: bool = False):
 
 @voices.command("import")
 def voice_import(source: Path, overwrite: bool = False):
-    show({"imported": VoiceStore(load_settings()).import_directory(source, overwrite)})
+    s = load_settings()
+    if s.tts.mode == "gateway":
+        import base64
+
+        count = 0
+        with TTSClient(s) as client:
+            for path in sorted(source.glob("*/*.pt")):
+                role = path.parent.name
+                emotion = path.stem.removeprefix(role + "_")
+                client.manage_voices(
+                    "import",
+                    role=role,
+                    emotion=emotion,
+                    overwrite=overwrite,
+                    content_base64=base64.b64encode(path.read_bytes()).decode(),
+                )
+                count += 1
+        show({"imported_to_windows": count})
+    else:
+        show({"imported": VoiceStore(s).import_directory(source, overwrite)})
 
 
 @voices.command("sync")
 def voice_sync():
     s = load_settings()
     with TTSClient(s) as c:
-        show(c.sync_voices(VoiceStore(s).assets()))
+        show(VoiceStore(s).remote_inventory(c) if s.tts.mode == "gateway" else c.list_roles())
 
 
 @voices.command("create")
@@ -185,12 +204,36 @@ def merge(
 
 
 @app.command()
+def capabilities():
+    """读取 Windows 当前接口文档、RPC、音色操作与限制。"""
+    with TTSClient(load_settings()) as client:
+        show(client.capabilities())
+
+
+@app.command()
+def render(name: str):
+    """按已保存的视频设置合成成片。"""
+    from .video import render_video
+
+    show(render_video(project(name)))
+
+
+@app.command()
+def package(name: str):
+    """打包已确认的成片、音频、字幕与工程快照。"""
+    from .delivery import build_delivery
+
+    show(build_delivery(project(name)))
+
+
+@app.command()
 def run(
     topic: str,
     keywords: str = "",
     episodes: int = typer.Option(1, min=1, max=30),
     name: str = "series",
     bgm: Path | None = None,
+    video: bool = False,
 ):
     s = load_settings()
     for i in range(1, episodes + 1):
@@ -199,7 +242,7 @@ def run(
             p.create(topic, [k.strip() for k in keywords.split(",") if k.strip()])
         if p.script().meta.topic != topic:
             raise typer.BadParameter("工程名称已被其他话题使用，请更换 --name")
-        stage = advance(p, bgm=bgm)
+        stage = advance(p, bgm=bgm, include_video=video)
         typer.echo(f"{p.name}: {stage} → http://127.0.0.1:8765（serve 开启编辑页）")
 
 

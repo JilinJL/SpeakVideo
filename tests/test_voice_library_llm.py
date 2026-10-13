@@ -24,7 +24,7 @@ def pt(content=b"tensor-data"):
     return buffer.getvalue()
 
 
-def test_voice_library_replacement_invalidation_usage_guard_and_restore(project):
+def test_voice_library_replacement_invalidation_usage_guard_and_permanent_delete(project):
     project.approve("script")
     project.approve("binding")
     with TestClient(create_app(project.settings)) as client:
@@ -55,7 +55,8 @@ def test_voice_library_replacement_invalidation_usage_guard_and_restore(project)
             == 200
         )
         assert not project.approved("binding")
-        assert client.get("/api/voices/trash").json()[0]["reason"] == "replaced"
+        assert client.get("/api/voices/trash").status_code == 404
+        assert not (project.settings.paths.cache / "voice-trash").exists()
 
         added = client.post(
             "/api/voices/import",
@@ -71,9 +72,9 @@ def test_voice_library_replacement_invalidation_usage_guard_and_restore(project)
         assert client.get("/api/voices/assets/改名/开心/download").content == pt()
         deleted = client.delete("/api/voices/assets/改名/开心").json()
         assert client.get("/api/voices/assets/改名/开心").status_code == 400
-        restored = client.post(f"/api/voices/trash/{deleted['trash_id']}/restore")
-        assert restored.status_code == 200 and restored.json()["ref_text"] == "你好"
-        assert client.post(f"/api/voices/trash/{deleted['trash_id']}/restore").status_code == 409
+        assert deleted["permanent"] and "trash_id" not in deleted
+        assert client.post("/api/voices/trash/legacy/restore").status_code in {404, 405}
+        assert not (project.settings.paths.cache / "voice-trash").exists()
 
 
 def test_voice_import_rejects_invalid_pt_and_paths(project):
@@ -201,7 +202,7 @@ def test_llm_key_and_provider_failover_json_mode_and_no_secret_errors(monkeypatc
 def test_connection_status_distinguishes_auth_offline_and_network(project, monkeypatch):
     for code, gateway, worker in [
         (401, "connected", "unknown"),
-        (503, "connected", "offline"),
+        (503, "connected", "unknown"),
         (None, "unreachable", "unknown"),
     ]:
 

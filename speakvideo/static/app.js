@@ -10,22 +10,59 @@ let booted = false, projectsCache = [], dragged = null, taskStatus = new Map(), 
 let voiceAssets = [], selectedAsset = null, llmDraft = null, connectionBusy = false;
 const previewTasks = new Map();
 const previewAudio = new Map();
-let recorder = null, micStream = null, recordingTimer = null, recordingDiscard = false, recordingStarted = 0;
+let capture = null, recorderModule = null, currentDesignTask = '', runtimeBusy = false;
+let videoDirty = false, videoUploading = false;
+let libraryEditable = false, libraryMutation = false, libraryRefresh = null, factorySubmitting = '', factoryFinishing = '', currentCreateTask = '', referenceUploading = false, syncSubmitting = false;
+const activeTask = status => ['submitting', 'queued', 'running'].includes(status);
+let homeProjects = [];
+let tasksPolling = false;
 
-const TABS = ['script', 'binding', 'production'];
-const TASK_LABELS = {brief: '生成阐述', generate: '生成剧本', synth: '合成配音', retry: '重试单行', merge: '合并导出', run: '完整工作流', design: '试音', create: '固化音色', sync: '同步音色', preview: '音色试听', llm_test: 'LLM 连接测试'};
+const TABS = ['script', 'binding', 'production', 'video'];
+const TASK_LABELS = {brief: '写对话草稿', extend: '扩展对话', generate: '生成台词', synth: '合成配音', retry: '重试单行', merge: '合并导出', render: '合成视频', run: '完整音频工作流', design: '试音', create: '固化音色', sync: '刷新音色库', preview: '音色试听', llm_test: 'LLM 连接测试'};
 const TASK_STATES = {queued: '排队中', running: '执行中', succeeded: '完成', failed: '失败', paused: '已暂停', interrupted: '被中断'};
+TASK_LABELS.package = '打包交付';
 const LINE_STATES = {succeeded: '已合成', failed: '失败', running: '合成中', pending: '待合成'};
 
+const icon = name => `<svg class="ico" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+const store = {
+  get(key, fallback) { try { const v = localStorage.getItem('speakvideo.' + key); return v === null ? fallback : JSON.parse(v); } catch { return fallback; } },
+  set(key, value) { try { localStorage.setItem('speakvideo.' + key, JSON.stringify(value)); } catch { /* 隐私模式下不记忆布局 */ } },
+};
+for (const [id, target] of store.get('voicePreviewTasks', [])) previewTasks.set(id, target);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
 const fmtBytes = n => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : n > 1024 ? Math.round(n / 1024) + ' KB' : (n || 0) + ' B';
 const fmtTime = s => { s = Number(s) || 0; const m = Math.floor(s / 60); return m ? `${m} 分 ${Math.round(s % 60)} 秒` : `${s.toFixed(1)} 秒`; };
 
 /* ───────── 基础 ───────── */
+function placeMessages() {
+  const host = $('toast'), parent = $$('dialog[open]').at(-1) || document.body;
+  // A popover outside a modal is visually above it but remains inert. Keep it
+  // inside the active modal so its close button and hover timer are operable.
+  if (host.parentElement !== parent) parent.append(host);
+  if (!host.childElementCount) return;
+  if (host.showPopover) { if (host.matches(':popover-open')) host.hidePopover(); host.showPopover(); }
+  else host.style.display = 'flex';
+}
+$$('dialog').forEach(dialog => dialog.addEventListener('close', placeMessages));
 function toast(message, isError = false) {
-  const el = $('toast');
-  el.textContent = message; el.classList.toggle('error', isError); el.hidden = false;
-  clearTimeout(toast.timer); toast.timer = setTimeout(() => el.hidden = true, isError ? 8000 : 4000);
+  const host = $('toast');
+  if ([...host.children].some(el => el.dataset.message === String(message))) return;
+  const item = document.createElement('div'); item.dataset.message = String(message);
+  while (host.childElementCount >= 5) host.firstElementChild.remove();
+  item.className = `message ${isError ? 'error' : 'success'}`;
+  item.setAttribute('role', isError ? 'alert' : 'status');
+  const symbol = document.createElement('span'); symbol.className = 'message-symbol'; symbol.textContent = isError ? '!' : '✓';
+  const content = document.createElement('span'); content.textContent = message;
+  const close = document.createElement('button'); close.className = 'message-close'; close.textContent = '×'; close.setAttribute('aria-label', '关闭消息');
+  item.append(symbol, content, close); host.append(item);
+  // Popovers share the browser top layer with dialogs, so feedback stays visible.
+  placeMessages();
+  let timer;
+  const dismiss = () => { clearTimeout(timer); item.remove(); if (!host.childElementCount) { if (host.hidePopover) host.hidePopover(); else host.style.display = 'none'; } };
+  close.onclick = dismiss;
+  const schedule = () => timer = setTimeout(dismiss, isError ? 12000 : 4500);
+  item.onpointerenter = () => clearTimeout(timer); item.onpointerleave = schedule;
+  schedule();
 }
 async function api(path, method = 'GET', body) {
   let response;
@@ -54,18 +91,65 @@ function renderProjects() {
   const q = $('projectFilter').value.trim().toLowerCase();
   const list = projectsCache.filter(p => !q || p.name.toLowerCase().includes(q) || (p.topic || '').toLowerCase().includes(q));
   $('projectFilter').hidden = projectsCache.length < 6;
+  $('projectCount').textContent = projectsCache.length || '';
   $('projects').innerHTML = list.map(p => `<button class="project ${p.name === current ? 'selected' : ''}" data-project="${escape(p.name)}"><b>${escape(p.name)}</b><small>${escape(p.topic || '未填写话题')}</small></button>`).join('')
     || `<div class="empty">${projectsCache.length ? '没有匹配的工程' : '还没有工程'}</div>`;
   $$('[data-project]', $('projects')).forEach(b => b.onclick = () => safe(() => selectProject(b.dataset.project)));
 }
-async function inventory() {
-  voices = await api('/api/voices');
-  $('voiceInventory').innerHTML = Object.entries(voices).map(([role, emotions]) =>
-    `<button class="voice" data-voice-role="${escape(role)}" title="点击管理 ${escape(role)}"><span>${escape(role)}</span><small>${emotions.map(escape).join(' · ')}</small></button>`).join('')
-    || '<div class="empty">还没有音色，点 ＋ 去音色工厂创建。</div>';
-  $$('[data-voice-role]', $('voiceInventory')).forEach(b => b.onclick = () => safe(() => openLibrary(b.dataset.voiceRole)));
+async function inventory({includeVoices = true} = {}) {
   projectsCache = await api('/api/projects');
   renderProjects();
+  if (!includeVoices) return;
+  voices = await api('/api/voices');
+  $('voiceCount').textContent = Object.keys(voices).length || '';
+  $('voiceRoleOptions').innerHTML = Object.keys(voices).map(role => `<option value="${escape(role)}">`).join('');
+  const opened = new Set($$('details[open]', $('voiceInventory')).map(el => el.dataset.inventoryRole));
+  $('voiceInventory').innerHTML = Object.entries(voices).map(([role, emotions]) =>
+    `<details class="inventory-role" data-inventory-role="${escape(role)}" ${opened.has(role) ? 'open' : ''}><summary><span>${escape(role)}</span><small>${emotions.length} 个情绪</small></summary><div class="inventory-emotions">${emotions.map(emotion => `<button class="voice" data-voice-role="${escape(role)}" data-voice-emotion="${escape(emotion)}">${escape(emotion)}</button>`).join('')}</div></details>`).join('')
+    || '<div class="empty">还没有音色。点上方 + 去音色工厂创建。</div>';
+  $$('[data-voice-role]', $('voiceInventory')).forEach(b => b.onclick = () => safe(async () => { await openLibrary(b.dataset.voiceRole); selectVoiceAsset(voiceAssets.find(a => a.role === b.dataset.voiceRole && a.emotion === b.dataset.voiceEmotion)); }));
+
+}
+
+/* ───────── 主页 ───────── */
+function renderHomeProjects() {
+  const query = $('homeProjectFilter').value.trim().toLowerCase();
+  const projects = homeProjects.filter(p => !query || `${p.name} ${p.topic}`.toLowerCase().includes(query));
+  $('homeProjectCount').textContent = `${homeProjects.length} 个 · 最近更新优先`;
+  $('homeProjectFilter').hidden = !homeProjects.length;
+  $('homeProjects').innerHTML = projects.map(p => {
+    const href = `/?project=${encodeURIComponent(p.name)}&tab=${encodeURIComponent(p.tab)}`;
+    const updated = new Intl.DateTimeFormat('zh-CN', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Shanghai'}).format(new Date(p.updated_at * 1000));
+    const active = lastTasks.find(t => t.project === p.name && ['queued', 'running'].includes(t.status));
+    return `<a class="home-project" href="${href}" data-home-project="${escape(p.name)}" data-home-tab="${escape(p.tab)}">
+      <span class="home-project-icon">${icon(p.tab === 'video' ? 'play' : 'folder')}</span>
+      <div class="home-project-copy"><h3>${escape(p.topic || p.name)}</h3><p><span>${escape(p.name)}</span><span>${p.line_count} 行台词</span><span>更新于 ${escape(updated)}</span></p></div>
+      <span class="home-stage ${active ? 'running' : p.tab}">${escape(active ? (active.status === 'running' ? '制作中' : '排队中') : p.stage)}</span><span class="home-project-arrow" aria-hidden="true">↗</span>
+    </a>`;
+  }).join('') || `<div class="home-empty"><span>${icon('folder')}</span><h3>${query ? '没有找到匹配的工程' : '你的第一段对话，从一个问题开始。'}</h3><p>${query ? '换个关键词，试试话题或工程名称。' : '点上方「新建对话」，写下你想聊的话题。'}</p></div>`;
+  $$('[data-home-project]').forEach(link => link.onclick = event => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button) return;
+    event.preventDefault();
+    safe(() => selectProject(link.dataset.homeProject, {tab: link.dataset.homeTab}));
+  });
+}
+async function refreshHome() {
+  const response = await api('/api/home');
+  homeProjects = response.projects;
+  if (!current) renderHomeProjects();
+}
+async function showHome() {
+  current = ''; data = null; dirty = false; videoDirty = false; booted = true;
+  $('welcome').hidden = false; $('workspace').hidden = true; $('steps').hidden = true; $('save').hidden = true;
+  $('saveState').hidden = true; $('projectName').hidden = true;
+  $('title').textContent = '创作工作台'; document.title = 'SpeakVideo · 创作主页';
+  document.querySelector('.main').classList.add('on-home');
+  applyRail();
+  $('homeSetup').hidden = !!config.llm_configured;
+  const link = new URL(location.href); link.searchParams.delete('project'); link.searchParams.delete('tab');
+  history.replaceState(null, '', link);
+  renderProjects(); renderTasks();
+  await refreshHome();
 }
 
 /* ───────── 工程加载 ───────── */
@@ -73,47 +157,59 @@ function defaultTab() {
   const a = data.workflow?.approvals || {};
   if (!a.script) return 'script';
   if (!a.binding) return 'binding';
-  return 'production';
+  return a.audio ? 'video' : 'production';
 }
-async function selectProject(name, {keepTab = false} = {}) {
+async function selectProject(name, {keepTab = false, tab: preferredTab = null} = {}) {
   if (name !== current && dirty && !confirm('有未保存修改，仍要切换工程吗？')) return;
   const switching = name !== current;
   current = name; data = await api(url('')); dirty = false;
   data.workflow ||= {}; data.workflow.approvals ||= {};
 
   $('welcome').hidden = true; $('workspace').hidden = false; $('steps').hidden = false; $('save').hidden = false;
+  $('saveState').hidden = false; $('projectName').hidden = false;
+  document.querySelector('.main').classList.remove('on-home');
+  applyRail();
   $('projectName').textContent = current;
   $('title').textContent = data.script.meta.topic || '未命名对话';
+  document.title = `${data.script.meta.topic || current} - SpeakVideo 音频工作台`;
   $('topic').value = data.script.meta.topic; $('keywords').value = data.script.meta.keywords.join(', ');
   $('guidance').value = data.script.meta.guidance || ''; $('brief').value = data.script.meta.brief;
+  for (const key of ['brief', 'structure']) {
+    const custom = data.script.meta.prompts?.[key] || '';
+    $(`${key}Prompt`).value = custom.trim() ? custom : config.script_prompts[key];
+  }
+  $('structureContract').value = config.script_json_contract;
+  renderPromptState();
   setSaveState('已保存');
 
   $('personas').innerHTML = data.script.cast.map(m =>
-    `<label class="field" style="${speakerVar(m.slot)}"><span><span class="dot" style="background:var(--speaker)"></span>${escape(m.slot)} 人设</span><input data-persona="${escape(m.slot)}" value="${escape(m.persona)}"></label>`).join('');
-  $$('input', $('personas')).forEach(input => input.oninput = () => { data.script.cast.find(m => m.slot === input.dataset.persona).persona = input.value; markDirty(); });
+    `<label class="field" style="${speakerVar(m.slot)}"><span><span class="dot" style="background:var(--speaker)"></span>${escape(m.slot)} 人设</span><textarea rows="3" maxlength="2000" data-persona="${escape(m.slot)}">${escape(m.persona)}</textarea></label>`).join('');
+  $$('textarea', $('personas')).forEach(input => input.oninput = () => { data.script.cast.find(m => m.slot === input.dataset.persona).persona = input.value; markDirty(); });
 
-  renderLines(); renderBindings(); renderReport(data.preflight); renderMedia(); updateExports();
+  renderLines(); renderBindings(); renderReport(data.preflight); renderMedia(); updateExports(); renderVideo();
   const requested = new URLSearchParams(location.search).get('tab');
   let tab = defaultTab();
-  if (keepTab && !switching) tab = activeTab;
+  if (TABS.includes(preferredTab)) tab = preferredTab;
+  else if (keepTab && !switching) tab = activeTab;
   else if (!booted && TABS.includes(requested)) tab = requested;
   booted = true;
   switchTab(tab);
-  await inventory(); renderTasks();
+  await inventory({includeVoices: false}); renderTasks();
 }
 
 /* ───────── 步骤 ───────── */
 function switchTab(id) {
   activeTab = id;
   $$('.tab').forEach(e => e.hidden = e.id !== id);
+  $('workspace').dataset.tab = id;
   renderSteps();
   const link = new URL(location.href); link.searchParams.set('project', current); link.searchParams.set('tab', id); history.replaceState(null, '', link);
-  $('workspace').parentElement.scrollTop = 0;
+  $('workspace').scrollTop = 0;
   growAll();
 }
 function renderSteps() {
   const a = data?.workflow?.approvals || {};
-  const doneMap = {script: a.script, binding: a.binding, production: a.audio};
+  const doneMap = {script: a.script, binding: a.binding, production: a.audio, video: data?.video_current};
   $$('[data-tab]').forEach(b => {
     b.classList.toggle('active', b.dataset.tab === activeTab);
     b.classList.toggle('done', !!doneMap[b.dataset.tab] && !dirty);
@@ -128,20 +224,32 @@ function options(values, selected, placeholder, labelled = false) {
 function growAll() { requestAnimationFrame(() => $$('.line textarea').forEach(autoGrow)); }
 function autoGrow(el) {
   if (!el.offsetParent) return; el.style.height = 'auto'; el.style.height = el.scrollHeight + 2 + 'px'; }
-function lineStatus(id) { return data.manifest?.lines?.[id]?.status || 'pending'; }
+function lineStatus(id) {
+  const status = data.manifest?.lines?.[id]?.status || 'pending';
+  return status === 'succeeded' && data.preflight?.reusable_ids && !data.preflight.reusable_ids.includes(id) ? 'pending' : status;
+}
 
 function renderLineStats() {
   const lines = data.script.lines;
   const done = lines.filter(l => lineStatus(l.id) === 'succeeded').length;
-  const chars = lines.reduce((n, l) => n + l.words.length, 0);
-  $('lineStats').textContent = lines.length ? `${lines.length} 行 · ${chars} 字 · 已合成 ${done}` : '';
+  const {chars, seconds} = SpeakVideoTiming.estimate(lines);
+  $('lineStats').textContent = lines.length ? `${lines.length} 行 · ${chars} 字 · 预计 ${SpeakVideoTiming.format(seconds)} · 已合成 ${done}` : '';
+  $('lineStats').title = '按约 5.07 字/秒加台词停顿估算播放时长；合并配音的组内停顿由模型自然朗读，实际时长会随音色和情绪变化。';
+}
+function validateLineInput(input) {
+  const count = SpeakVideoTiming.characterCount(input.value);
+  const valid = count >= 3 && count <= 200;
+  input.classList.toggle('bad', !valid);
+  input.setAttribute('aria-invalid', String(!valid));
+  input.title = `${count} 字 · 每行须为 3–200 字`;
+  input.setCustomValidity(valid ? '' : '每行台词须为 3–200 字');
 }
 function renderLines() {
   const lines = data.script.lines;
   const slots = data.script.cast.map(c => c.slot);
   renderLineStats();
   if (!lines.length) {
-    $('lines').innerHTML = '<div class="empty-lines">还没有台词。按左侧阐述生成剧本，或手动添加一行。</div>';
+    $('lines').innerHTML = '<div class="empty-lines">还没有台词。点左侧“生成台词”，或手动添加一行。</div>';
     return;
   }
   $('lines').innerHTML = lines.map(line => {
@@ -153,11 +261,11 @@ function renderLines() {
         <div class="line-bar">
           <select data-field="slot" class="slot" aria-label="角色">${options(slots, line.slot)}</select>
           <select data-field="mood" class="mood ${missing ? 'bad' : ''}" title="${missing ? '该情绪尚未映射到音色' : '情绪'}" aria-label="情绪">${options(Object.keys(config.moods || {}), line.mood, '', true)}</select>
-          <span class="pause" title="句后停顿（毫秒）"><input data-field="pause_after_ms" type="number" min="0" max="10000" step="50" value="${line.pause_after_ms}" aria-label="句后停顿"></span>
+          <span class="pause" title="句后停顿（毫秒）；合并配音组内按标点自然停顿，组尾追加此停顿。至少 1000 ms 时分组。"><input data-field="pause_after_ms" type="number" min="0" max="10000" step="50" value="${line.pause_after_ms}" aria-label="句后停顿"></span>
           <span class="meta"><span class="status ${status}">${escape(LINE_STATES[status] || status)}</span><span>${escape(line.id)}</span></span>
-          <span class="tools"><button class="icon-btn" data-retry title="重新合成这一行" aria-label="重试">↻</button><button class="icon-btn danger" data-delete title="删除这一行" aria-label="删除">✕</button></span>
+          <span class="tools"><button class="icon-btn" data-retry title="重新合成这一行所在的连续语音组" aria-label="重试">${icon('refresh')}</button><button class="icon-btn danger" data-delete title="删除这一行" aria-label="删除">${icon('x')}</button></span>
         </div>
-        <textarea data-field="words" rows="1" aria-label="台词" placeholder="输入台词">${escape(line.words)}</textarea>
+        <textarea data-field="words" rows="1" aria-label="台词" placeholder="输入台词（3–200 字）">${escape(line.words)}</textarea>
       </div>
     </div>`;
   }).join('');
@@ -173,9 +281,11 @@ function renderLines() {
         markDirty();
         if (field === 'slot') { row.setAttribute('style', speakerVar(input.value)); renderBindings(); }
         if (field === 'mood') { input.classList.toggle('bad', !data.cast[find().slot]?.mood_map[input.value]); renderBindings(); }
-        if (field === 'words') renderLineStats();
+        if (field === 'words') validateLineInput(input);
+        if (['words', 'pause_after_ms', 'slot', 'mood'].includes(field)) renderLineStats();
       };
     });
+    validateLineInput(row.querySelector('textarea'));
     autoGrow(row.querySelector('textarea'));
     row.querySelector('[data-delete]').onclick = () => { data.script.lines = data.script.lines.filter(l => l.id !== id); markDirty(); renderLines(); renderBindings(); };
     row.querySelector('[data-retry]').onclick = () => safe(() => action('retry', id));
@@ -235,14 +345,27 @@ function collect() {
   data.script.meta.topic = $('topic').value;
   data.script.meta.keywords = $('keywords').value.split(/[,，]/).map(v => v.trim()).filter(Boolean);
   data.script.meta.guidance = $('guidance').value; data.script.meta.brief = $('brief').value;
+  data.script.meta.prompts ||= {};
+  for (const key of ['brief', 'structure']) {
+    const value = $(`${key}Prompt`).value;
+    data.script.meta.prompts[key] = value.trim() === config.script_prompts[key].trim() ? '' : value;
+  }
 }
 async function save() {
   if (!data) return;
+  const invalid = data.script.lines.find(line => {
+    const count = SpeakVideoTiming.characterCount(line.words);
+    return count < 3 || count > 200;
+  });
+  if (invalid) throw Error(`${invalid.id} 台词须为 3–200 字，请修改后保存。`);
+
   collect(); setSaveState('保存中…');
   const result = await api(url(''), 'PUT', {script: data.script, cast: data.cast});
+  if (videoDirty) await saveVideo();
   dirty = false; setSaveState('已保存'); renderSteps();
   $('title').textContent = data.script.meta.topic || '未命名对话';
-  renderReport(result.preflight);
+  document.title = `${data.script.meta.topic || current} - SpeakVideo 音频工作台`;
+  renderPromptState(); renderReport(result.preflight);
 }
 
 /* ───────── 生成 ───────── */
@@ -283,36 +406,144 @@ function updateExports() {
   }
 }
 async function action(type, lineId) {
+  if (videoUploading) throw Error('请等待素材上传完成');
   if (type === 'generate' && data.script.lines.length && !confirm('重新生成将替换全部台词并清空复用记录，继续吗？')) return;
+  if (type === 'extend' && !$('brief').value.trim()) throw Error('请先填写或生成草稿，再扩展对话');
   await save();
+  if (type === 'render') await saveVideo();
   const task = await queue(url('/actions'), {action: type, line_id: lineId || null});
   toast(`已加入队列：${TASK_LABELS[task.label] || task.label}`);
 }
+
+/* ───────── 视频工作台 ───────── */
+function renderVideoAssets() {
+  const assets = data.video?.assets || [];
+  $('videoAssetCount').textContent = `${assets.length} 个素材`;
+  $('videoAssets').innerHTML = assets.map((asset, index) => {
+    const source = url('/files/' + asset.path);
+    return `<div class="video-asset">
+      ${asset.kind === 'image' ? `<img src="${source}" alt="${escape(asset.name)}">` : `<video src="${source}" controls muted preload="metadata" playsinline aria-label="${escape(asset.name)}"></video>`}
+      <div class="video-asset-info"><b>${index + 1}. ${escape(asset.name)}</b><small>${asset.kind === 'image' ? '图片' : fmtTime(asset.duration)} · ${fmtBytes(asset.bytes)}</small>
+        <div class="row"><button class="btn ghost sm" data-video-move="${index}" data-delta="-1" data-boundary="${index === 0}" ${index === 0 ? 'disabled' : ''}>上移</button><button class="btn ghost sm" data-video-move="${index}" data-delta="1" data-boundary="${index === assets.length - 1}" ${index === assets.length - 1 ? 'disabled' : ''}>下移</button><button class="btn ghost sm" data-video-remove="${index}">移除</button></div>
+      </div></div>`;
+  }).join('') || '<p class="hint">添加本地视频或图片，也可以直接生成字幕背景视频。</p>';
+  $$('[data-video-move]').forEach(button => button.onclick = () => {
+    const i = Number(button.dataset.videoMove), j = i + Number(button.dataset.delta);
+    [assets[i], assets[j]] = [assets[j], assets[i]];
+    videoDirty = true; markDirty(); renderVideoAssets(); toast('素材顺序已调整，保存后生效');
+  });
+  $$('[data-video-remove]').forEach(button => button.onclick = () => {
+    assets.splice(Number(button.dataset.videoRemove), 1);
+    videoDirty = true; markDirty(); renderVideoAssets(); toast('素材已移出列表，保存后生效');
+  });
+}
+function renderVideo() {
+  data.video ||= {assets: [], options: {width: 1080, height: 1920, fps: 30, font_size: 48, image_seconds: 5, burn_subtitles: true}};
+  videoDirty = false;
+  const options = data.video.options, size = `${options.width}x${options.height}`;
+  if (!$$('option', $('videoSize')).some(o => o.value === size)) $('videoSize').add(new Option(size.replace('x', ' × '), size));
+  $('videoSize').value = size;
+  if (!$$('option', $('videoFps')).some(o => Number(o.value) === options.fps)) $('videoFps').add(new Option(`${options.fps} fps`, String(options.fps)));
+  $('videoFps').value = options.fps;
+  $('videoImageSeconds').value = options.image_seconds;
+  $('videoFontSize').value = options.font_size;
+  $('videoBurnSubtitles').checked = options.burn_subtitles;
+  $('videoSubtitleLegend').innerHTML = data.script.cast.map(member => `<span><i style="background:${escape(config.subtitle_colors?.[member.slot] || '#FFFFFF')}"></i>${escape(data.cast[member.slot]?.role || member.slot)} · ${member.slot === 'p1' ? '蓝色' : '橙色'}</span>`).join('');
+  $('videoAudioState').textContent = data.audio_current ? `完整音频 · ${fmtTime(data.audio_export.duration)}` : '请先合并导出完整音频';
+  renderVideoAssets();
+  const meta = data.video_export, file = meta?.files?.['final.mp4'];
+  $('approveVideo').disabled = !data.video_current || !data.workflow.approvals.audio;
+  $('approveVideo').textContent = data.workflow.approvals.video ? '成片已确认' : '确认当前成片';
+  $('deliveryState').textContent = !data.workflow.approvals.audio ? '先到第 3 步试听并确认完整音频，再确认成片' : !data.video_current ? '请先合成与当前工程一致的视频' : !data.workflow.approvals.video ? '预览并确认当前成片后，可打包音视频、字幕和工程快照' : data.delivery_current ? '交付包与当前工程一致' : '成片已确认，可以打包交付';
+  $('deliveryExports').innerHTML = Object.entries(data.delivery_export?.files || {}).map(([name, f]) => `<a href="${url('/files/exports/' + f.path)}" download>↓ ${escape(name)} <small>${fmtBytes(f.bytes)}</small></a>`).join('');
+  $('finalVideo').hidden = !file; $('videoEmpty').hidden = !!file;
+  if (file) {
+    const source = url('/files/exports/' + file.path);
+    if ($('finalVideo').getAttribute('src') !== source) $('finalVideo').src = source;
+    $('videoState').textContent = `${meta.mode === 'demo' ? '测试音频 · ' : ''}${fmtTime(meta.duration)} · ${meta.options.width} × ${meta.options.height} · ${data.video_current ? '与当前工程一致' : '设置或工程已变化，请重新合成'}`;
+    $('videoState').classList.toggle('stale', !data.video_current);
+    $('videoExports').innerHTML = Object.entries(meta.files).map(([name, f]) => `<a href="${url('/files/exports/' + f.path)}" download>↓ ${escape(name)} <small>${fmtBytes(f.bytes)}</small></a>`).join('');
+  } else {
+    $('finalVideo').removeAttribute('src'); $('finalVideo').load();
+    $('videoState').textContent = '';
+    $('videoExports').innerHTML = '<p class="hint">合成完成后可在这里预览并下载带字幕的 MP4。</p>';
+  }
+}
+async function saveVideo() {
+  const [width, height] = $('videoSize').value.split('x').map(Number);
+  const body = {width, height, fps: Number($('videoFps').value), font_size: Number($('videoFontSize').value), image_seconds: Number($('videoImageSeconds').value), burn_subtitles: $('videoBurnSubtitles').checked, asset_ids: data.video.assets.map(a => a.id)};
+  data.video = await api(url('/video'), 'PUT', body);
+  videoDirty = false;
+}
+for (const id of ['videoSize', 'videoFps', 'videoImageSeconds', 'videoFontSize', 'videoBurnSubtitles']) $(id).onchange = () => {
+  videoDirty = true; markDirty();
+};
+$('saveVideo').onclick = () => safe(async () => { await save(); await saveVideo(); await selectProject(current, {keepTab: true}); toast('视频设置已保存'); });
+$('videoFiles').onchange = () => safe(async () => {
+  const files = [...$('videoFiles').files], name = current;
+  if (!files.length) return;
+  await save(); await saveVideo();
+  videoUploading = true; $('videoFiles').disabled = true;
+  try {
+    for (let i = 0; i < files.length; i++) {
+      $('videoUploadState').textContent = `上传 ${i + 1}/${files.length}：${files[i].name}`;
+      const form = new FormData(); form.append('file', files[i]);
+      const config = await api(`/api/projects/${encodeURIComponent(name)}/assets/video`, 'POST', form);
+      if (name === current) { data.video = config; renderVideoAssets(); }
+    }
+    if (name === current) await selectProject(current, {keepTab: true});
+    toast(`已添加 ${files.length} 个素材`);
+  } finally {
+    videoUploading = false; $('videoFiles').value = ''; $('videoUploadState').textContent = ''; renderTasks();
+  }
+});
 async function approval(gate) {
   await save();
   await api(url(`/approve/${gate}`), 'POST', {});
   data.workflow.approvals[gate] = true;
-  toast({script: '剧本已定稿', binding: '音色绑定已确认', audio: '完整音频已确认'}[gate]);
-  if (gate === 'script') switchTab('binding'); else if (gate === 'binding') switchTab('production'); else renderSteps();
+  toast({script: '剧本已定稿', binding: '音色绑定已确认', audio: '完整音频已确认', video: '当前成片已确认，可以打包交付'}[gate]);
+  if (gate === 'video') await selectProject(current, {keepTab: true});
+  if (gate === 'script') switchTab('binding'); else if (gate === 'binding') switchTab('production'); else if (gate === 'audio') switchTab('video'); else renderSteps();
 }
 
 /* ───────── 任务 ───────── */
+function taskDetail(t) {
+  const p = t.progress, parts = [];
+  if (p?.total > 0 && ['lines', 'assets'].includes(p.kind)) {
+    parts.push(`${p.completed}/${p.total} ${p.kind === 'lines' ? '行' : '个素材'}`);
+    if (p.failed) parts.push(`失败 ${p.failed} 行`);
+    if (p.current_line && t.status === 'running') parts.push(`正在合成 ${p.current_line}`);
+  }
+  if (t.status === 'queued') parts.push('等待前序任务完成');
+  else if (p?.stage && t.status === 'running') parts.push(p.stage);
+  else if (!parts.length) parts.push(t.result || t.error || TASK_STATES[t.status] || t.status);
+  if (t.elapsed_seconds != null) parts.push(`${['running'].includes(t.status) ? '已用时' : '用时'} ${fmtTime(t.elapsed_seconds)}`);
+  return parts.join(' · ');
+}
+
 function renderTasks() {
   const tasks = [...lastTasks].reverse();
   tasks.sort((a, b) => (b.project === current) - (a.project === current));
   const active = lastTasks.filter(t => ['queued', 'running'].includes(t.status));
-  $('taskBadge').textContent = active.length ? `(${active.length})` : '';
-  const busy = active.some(t => t.project === current);
-  $$('[data-action]').forEach(b => b.disabled = busy);
+  $('taskBadge').textContent = active.length || '';
+  const busy = videoUploading || active.some(t => t.project === current);
+  $$('[data-action]').forEach(b => b.disabled = busy || (b.dataset.action === 'render' && !data?.audio_current));
+  const packageButton = document.querySelector('[data-action="package"]');
+  packageButton.disabled = busy || !data?.video_current || !data?.workflow.approvals.video;
+  $('approveVideo').disabled = busy || !data?.video_current || !data?.workflow.approvals.audio;
+  for (const id of ['videoFiles', 'saveVideo']) $(id).disabled = busy;
+  $$('[data-video-move], [data-video-remove]').forEach(b => b.disabled = busy || b.dataset.boundary === 'true');
 
   $('tasks').innerHTML = tasks.slice(0, 20).map(t => {
     const p = t.progress;
-    const pct = p && p.total ? Math.round(p.completed / p.total * 100) : 0;
-    const msg = t.error || t.result || '';
+    const measurable = p && p.total > 0 && ['lines', 'assets'].includes(p.kind);
+    const pct = measurable ? Math.round(p.completed / p.total * 100) : 0;
+    const detail = taskDetail(t);
+    const msg = t.error || (t.result && !detail.includes(t.result) ? t.result : '');
     return `<div class="task ${t.project && t.project !== current ? 'other' : ''}">
       <div class="task-top"><b>${escape(TASK_LABELS[t.label] || t.label)}</b><span class="task-state ${t.status}">${escape(TASK_STATES[t.status] || t.status)}</span></div>
-      <div class="task-sub">${escape(t.project || '音色工厂')}${p ? ` · ${p.completed}/${p.total} 行${p.current_line ? ' · 正在生成 ' + escape(p.current_line) : ''}` : ''}</div>
-      ${p && t.status === 'running' ? `<div class="progress"><i style="width:${pct}%"></i></div>` : ''}
+      <div class="task-sub">${escape(t.project || '音色工厂')} · ${escape(detail)}</div>
+      ${t.status === 'running' ? `<div class="progress ${measurable ? '' : 'indeterminate'}"><i style="width:${measurable ? pct : 35}%"></i></div>` : ''}
       ${msg ? `<div class="task-msg ${t.status === 'failed' ? 'bad' : ''}">${escape(msg)}</div>` : ''}
       ${['queued', 'running'].includes(t.status) ? `<button class="btn sm" data-pause="${escape(t.id)}">暂停</button>` : ''}
     </div>`;
@@ -323,125 +554,361 @@ function renderTasks() {
   }));
 }
 async function pollTasks() {
+  if (tasksPolling) return;
+  tasksPolling = true;
+  try {
   const tasks = await api('/api/tasks');
   lastTasks = tasks;
   renderTasks();
-  let refresh = false;
+  let refresh = false, homeChanged = false;
   for (const t of tasks) {
     const prev = taskStatus.get(t.id);
+    if (prev !== t.status && t.project) homeChanged = true;
     if (taskStatus.has(t.id) && prev !== t.status) {
       if (t.project === current && ['succeeded', 'failed', 'paused'].includes(t.status)) refresh = true;
+      if (t.status === 'succeeded' && t.label !== 'create') toast(`${TASK_LABELS[t.label] || t.label}已完成${t.label === 'llm_test' && t.result ? `：${t.result}` : ''}`);
+      if (['paused','interrupted'].includes(t.status)) toast(`${TASK_LABELS[t.label] || t.label}${TASK_STATES[t.status]}`);
       if (t.status === 'failed') toast(`${TASK_LABELS[t.label] || t.label}失败：${t.error || ''}`, true);
       if (t.status === 'succeeded' && !t.project && t.label === 'design') {
-        referenceId = t.result;
-        $('voicePreview').src = `/api/previews/${referenceId}`; $('voicePreview').hidden = false;
-        setRef('试音已生成。满意的话点“固化为 pt 音色”，台词须与试音一致。', true);
+        if (t.id === currentDesignTask) {
+          factoryFinishing = 'design'; renderFactoryTasks(); setRef('试音已生成，正在准备波形与播放器…');
+          try {
+            const result = await api('/api/voices/reference', 'POST', await referenceForm(`/api/previews/${t.result}`, 'design.wav'));
+            await referenceEditor.load(result, '描述生成试音');
+            setRef('试音已生成，可试听或调整选区，然后直接克隆。');
+          } catch (error) { setRef(`试听音频加载失败：${error.message}，可重新生成试音。`); toast(error.message, true); }
+          finally { factoryFinishing = ''; renderFactoryTasks(); }
+        }
       }
-      if (t.status === 'succeeded' && !t.project && t.label === 'create') { await inventory(); if (data) renderBindings(); toast('音色已保存到 Mac voices/'); }
+      if (t.status === 'succeeded' && !t.project && t.label === 'create') { if (t.id === currentCreateTask) setRef('音色已保存，可在音色库中试听与管理。', true); await refreshLibrary(); toast(`音色已保存到${config.tts_mode === 'gateway' ? ' Windows 实际 PT 库' : '本机 Qwen PT 目录'}`); }
+      if ([currentDesignTask,currentCreateTask].includes(t.id) && ['failed','paused','interrupted'].includes(t.status)) setRef(`${t.label === 'design' ? '试音' : '克隆'}${TASK_STATES[t.status]}${t.error ? `：${t.error}` : '，可重新提交。'}`);
+      if (t.label === 'sync' && ['succeeded', 'failed'].includes(t.status)) await refreshLibrary();
       if (t.label === 'preview' && t.status === 'succeeded') {
         const target = previewTasks.get(t.id);
         if (target) previewAudio.set(JSON.stringify([target.role,target.emotion]), {sha256: target.sha256, url: `/api/previews/${t.result}`});
         if (target && selectedAsset?.role === target.role && selectedAsset?.emotion === target.emotion && selectedAsset.sha256 === target.sha256) { $('assetPreview').src = `/api/previews/${t.result}`; $('assetPreview').hidden = false; }
-        else if (target) toast(`${target.role}/${target.emotion} 试听已完成；请回到该条目试听。`);
+
       }
       if (t.label === 'llm_test' && ['succeeded', 'failed'].includes(t.status)) { $('llmTestState').textContent = t.result || t.error; $('llmTestState').classList.toggle('ready', t.status === 'succeeded'); }
     }
+    const preview = previewTasks.get(t.id);
+    if (preview) {
+      preview.status = t.status; preview.error = t.error || '';
+      if (t.status === 'succeeded' && t.result) previewAudio.set(JSON.stringify([preview.role, preview.emotion]), {sha256: preview.sha256, url: `/api/previews/${t.result}`});
+    }
     taskStatus.set(t.id, t.status);
   }
+  if (!current) {
+    if (homeChanged) await refreshHome();
+  }
+  store.set('voicePreviewTasks', [...previewTasks].filter(([id]) => !id.startsWith('submitting:')).slice(-50));
+  renderPreviewState(); renderFactoryTasks();
   // 运行中也同步行状态，让进度点实时变化
   const running = tasks.some(t => t.project === current && t.status === 'running');
   if ((refresh || running) && !dirty && current) {
     if (refresh) await selectProject(current, {keepTab: true});
     else { data = {...data, ...(await api(url('')))}; data.workflow.approvals ||= {}; renderLineMap(); renderLineStats(); $$('.line').forEach(row => { const s = lineStatus(row.dataset.id); const el = row.querySelector('.status'); el.className = `status ${s}`; el.textContent = LINE_STATES[s] || s; }); }
   }
+  } finally { tasksPolling = false; }
 }
 
 /* ───────── 音色工厂 ───────── */
 function setRef(text, ready = false) { $('referenceState').textContent = text; $('referenceState').classList.toggle('ready', ready); }
 function voiceBody(kind) { return {action: kind, role: $('voiceRole').value, emotion: $('voiceEmotion').value, text: $('voiceText').value, instruct: $('voiceDescription').value, reference_id: referenceId, overwrite: $('voiceOverwrite').checked}; }
-function openFactory() { $('factoryDialog').showModal(); }
+function openFactory(target = {}) {
+  if (typeof target.role === 'string') $('voiceRole').value = target.role;
+  if (typeof target.emotion === 'string') $('voiceEmotion').value = target.emotion;
+  $('factoryDialog').showModal(); referenceEditor.render(); refreshMicrophones(); renderFactoryTasks();
+}
+
+const referenceEditor = new ReferenceEditor({request: api, onError: error => toast(error.message, true), onChange: result => {
+  referenceId = result?.reference_id || '';
+  $('createVoice').disabled = !result || !!capture;
+  if (result) setRef(`当前选区 ${result.duration.toFixed(2)} 秒，可直接克隆。参考台词须对应选区内容。`, true);
+  else setRef('上传音频、录音或按描述生成试音后即可克隆。');
+  renderFactoryTasks();
+}});
+async function referenceForm(source, filename) {
+  const response = await fetch(source); if (!response.ok) throw Error('参考音频无法读取');
+  const form = new FormData(); form.append('file', await response.blob(), filename); return form;
+}
 
 async function useReference(file, label) {
-  const f = new FormData(); f.append('file', file);
-  const result = await api('/api/voices/reference', 'POST', f);
-  referenceId = result.reference_id;
-  $('voicePreview').src = result.preview_url; $('voicePreview').hidden = false;
-  setRef(`${label} · ${result.duration} 秒。请填写音频中实际说出的台词。`, true);
+  if (referenceUploading) return;
+  referenceUploading = true; referenceEditor.pending = true; referenceEditor.render(); renderFactoryTasks(); setRef('正在上传并处理参考音频…');
+  try {
+    const f = new FormData(); f.append('file', file);
+    const result = await api('/api/voices/reference', 'POST', f);
+    currentDesignTask = ''; await referenceEditor.load(result, label);
+    setRef('参考音频已就绪，可直接克隆；需要裁剪时拖动波形选区。', true); toast('参考音频已加载');
+  } catch (error) { setRef(`参考音频处理失败：${error.message}`); throw error; }
+  finally { referenceUploading = false; referenceEditor.pending = false; referenceEditor.render(); renderFactoryTasks(); }
 }
-function releaseMic() {
-  clearInterval(recordingTimer); recordingTimer = null;
-  micStream?.getTracks().forEach(t => t.stop()); micStream = null;
-  $('recordVoice').disabled = false; $('recordVoice').hidden = false; $('stopRecording').hidden = true;
-  $('voiceFile').disabled = false; $('designVoice').disabled = false; $('createVoice').disabled = false;
+function recordingControls() {
+  const busy = !!capture;
+  referenceEditor.pending = busy; referenceEditor.render();
+  $('recordVoice').disabled = busy; $('stopRecording').hidden = !capture?.recording; $('cancelRecording').hidden = !busy;
+  for (const id of ['voiceFile', 'designVoice', 'microphone', 'refreshMicrophones']) $(id).disabled = busy;
+  $('createVoice').disabled = busy || !referenceEditor.buffer;
+  renderFactoryTasks();
+}
+async function refreshMicrophones(notify = false) {
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+  try {
+    const selected = $('microphone').value;
+    const devices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+    $('microphone').replaceChildren(new Option('系统默认麦克风', ''), ...devices.map((d, i) => new Option(d.label || `麦克风 ${i + 1}`, d.deviceId)));
+    if (devices.some(d => d.deviceId === selected)) $('microphone').value = selected;
+    if (notify) toast('麦克风列表已刷新');
+  } catch (e) { $('recordingTime').textContent = `麦克风列表读取失败：${e.message}`; toast(e.message, true); }
+}
+function releaseCapture(session) {
+  clearInterval(session.timer); clearTimeout(session.stopTimeout); cancelAnimationFrame(session.raf);
+  session.source?.disconnect(); session.node?.disconnect(); session.mute?.disconnect(); session.node?.port.close();
+  session.stream?.getTracks().forEach(track => track.stop()); session.chunks = [];
+}
+function drawLive(session) {
+  if (capture !== session || !session.recording) return;
+  const canvas = $('liveWave'), painter = canvas.getContext('2d'); canvas.width = canvas.clientWidth || 800;
+  painter.clearRect(0, 0, canvas.width, canvas.height); painter.strokeStyle = '#2f6feb'; painter.beginPath();
+  for (let x = 0; x < canvas.width; x++) {
+    const y = canvas.height / 2 - (session.latest?.[Math.floor(x / canvas.width * session.latest.length)] || 0) * canvas.height * .45;
+    if (x) painter.lineTo(x, y); else painter.moveTo(x, y);
+  }
+  painter.stroke(); session.raf = requestAnimationFrame(() => drawLive(session));
+}
+function pcmFile(session) {
+  const bytes = new ArrayBuffer(44 + session.frames * 2), view = new DataView(bytes);
+  const text = (at, value) => [...value].forEach((ch, i) => view.setUint8(at + i, ch.charCodeAt(0)));
+  text(0, 'RIFF'); view.setUint32(4, bytes.byteLength - 8, true); text(8, 'WAVE'); text(12, 'fmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, session.rate, true); view.setUint32(28, session.rate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  text(36, 'data'); view.setUint32(40, session.frames * 2, true);
+  let frame = 0;
+  for (const chunk of session.chunks) for (const value of chunk) { const v = Math.max(-1, Math.min(1, value)); view.setInt16(44 + frame++ * 2, Math.round(v * (v < 0 ? 32768 : 32767)), true); }
+  return new File([bytes], 'recording.wav', {type: 'audio/wav'});
+}
+function finishRecording(session) {
+  if (capture !== session) return;
+  let file;
+  if (session.frames && session.peak >= .00001) file = pcmFile(session);
+  releaseCapture(session); capture = null; $('liveWave').hidden = true; recordingControls();
+  if (!file) { toast('未采集到声音，请检查麦克风、静音和系统权限后重录。', true); return; }
+  safe(async () => { await useReference(file, '直接 PCM 录音'); $('recordingTime').textContent = session.peak < .001 ? '录音音量偏低，请先试听' : '录音已就绪，可直接克隆'; });
+}
+function stopRecording() {
+  if (!capture?.recording || capture.stopping) return;
+  const session = capture; session.stopping = true; clearInterval(session.timer);
+  session.node.port.postMessage('stop'); $('recordingTime').textContent = '正在整理录音…';
+  session.stopTimeout = setTimeout(() => { if (capture === session) { cancelRecording(); toast('录音采集被中断，请重试。', true); } }, 3000);
 }
 async function startRecording() {
-  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) throw Error('当前浏览器不支持直接录音，请在 Edge / Chrome / Safari 中打开 localhost 工作台。');
-  $('recordVoice').disabled = true;
+  if (capture) return;
+  if (!navigator.mediaDevices?.getUserMedia || !window.AudioWorkletNode) throw Error('当前浏览器不支持 PCM 录音，请用 Chrome / Edge / Safari 打开 localhost。');
+  referenceEditor.stop();
+  const session = {chunks: [], frames: 0, peak: 0, lastSound: performance.now()}; capture = session; recordingControls();
+  $('recordingTime').textContent = '等待麦克风权限…';
   try {
-    micStream = await navigator.mediaDevices.getUserMedia({audio: true});
-    const mime = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus'].find(t => MediaRecorder.isTypeSupported(t));
-    if (!$('factoryDialog').open) { releaseMic(); return; }
-    const activeRecorder = new MediaRecorder(micStream, mime ? {mimeType: mime} : {});
-    recorder = activeRecorder;
-    const chunks = []; recordingDiscard = false;
-    recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
-    recorder.onerror = () => { recordingDiscard = true; releaseMic(); toast('录音失败，原参考音频仍保留。', true); };
-    recorder.onstop = () => {
-      const type = activeRecorder.mimeType; releaseMic(); recorder = null;
-      if (recordingDiscard) return;
-      const ext = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
-      $('recordingTime').textContent = '正在处理录音…';
-      safe(async () => { await useReference(new File(chunks, `recording.${ext}`, {type}), '直接录音已就绪'); $('recordingTime').textContent = '录音已保存'; });
+    const ctx = referenceEditor.context(); await ctx.resume();
+    if (capture !== session) return;
+    session.stream = await navigator.mediaDevices.getUserMedia({audio: {
+      ...($('microphone').value ? {deviceId: {exact: $('microphone').value}} : {}),
+      echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+    }, video: false});
+    if (capture !== session || !$('factoryDialog').open) { releaseCapture(session); return; }
+    await refreshMicrophones();
+    recorderModule ||= ctx.audioWorklet.addModule('/recorder-worklet.js').catch(error => { recorderModule = null; throw error; });
+    await recorderModule;
+    if (capture !== session) { releaseCapture(session); return; }
+    session.rate = ctx.sampleRate;
+    session.node = new AudioWorkletNode(ctx, 'reference-recorder', {processorOptions: {maxSeconds: 120}});
+    session.node.onprocessorerror = () => { if (capture === session) { cancelRecording(); toast('PCM 采集失败，请重试。', true); } };
+    session.node.port.onmessage = ({data}) => {
+      if (capture !== session) return;
+      if (data.type === 'samples') {
+        session.chunks.push(data.samples); session.frames += data.samples.length; session.latest = data.samples;
+        const peak = data.samples.reduce((p, v) => Math.max(p, Math.abs(v)), 0); session.peak = Math.max(session.peak, peak);
+        if (peak > .001) session.lastSound = performance.now();
+      } else if (data.type === 'stopped' || data.type === 'limit') finishRecording(session);
     };
-    recorder.start(); recordingStarted = Date.now();
-    $('recordVoice').hidden = true; $('stopRecording').hidden = false;
-    $('voiceFile').disabled = true; $('designVoice').disabled = true; $('createVoice').disabled = true;
-    $('recordingTime').textContent = '录音中 0 秒';
-    recordingTimer = setInterval(() => {
-      const seconds = Math.floor((Date.now() - recordingStarted) / 1000);
-      $('recordingTime').textContent = `录音中 ${seconds} 秒 / 120 秒`;
-      if (seconds >= 119 && recorder?.state === 'recording') recorder.stop();
-    }, 250);
+    session.source = ctx.createMediaStreamSource(session.stream); session.mute = ctx.createGain(); session.mute.gain.value = 0;
+    session.source.connect(session.node).connect(session.mute).connect(ctx.destination);
+    session.recording = true; session.started = performance.now(); $('liveWave').hidden = false; drawLive(session); recordingControls();
+    session.stream.getAudioTracks().forEach(track => track.addEventListener('ended', () => { if (capture === session) stopRecording(); }));
+    session.timer = setInterval(() => {
+      const seconds = Math.floor((performance.now() - session.started) / 1000);
+      $('recordingTime').textContent = performance.now() - session.lastSound > 3000 ? '未检测到声音，请检查静音或更换麦克风' : `PCM 录音中 ${seconds} 秒 / 120 秒`;
+      if (ctx.state !== 'running') cancelRecording();
+      else if (seconds >= 120) stopRecording();
+    }, 200);
   } catch (error) {
-    releaseMic();
+    releaseCapture(session);
+    if (capture !== session) return;
+    capture = null; recordingControls(); $('liveWave').hidden = true;
     throw Error(error.name === 'NotAllowedError' ? '麦克风权限被拒绝，请在浏览器地址栏允许本站使用麦克风后重试。' : error.name === 'NotFoundError' ? '未找到可用麦克风。' : `无法开始录音：${error.message}`);
   }
 }
 function cancelRecording() {
-  recordingDiscard = true;
-  if (recorder?.state === 'recording') recorder.stop();
-  else releaseMic();
+  if (!capture) return;
+  const session = capture; capture = null; releaseCapture(session); $('liveWave').hidden = true;
+  $('recordingTime').textContent = '已取消录音'; recordingControls();
 }
 
 /* ───────── PT 库 ───────── */
 const assetURL = a => `/api/voices/assets/${encodeURIComponent(a.role)}/${encodeURIComponent(a.emotion)}`;
+function setButtonBusy(button, busy, label) {
+  button.dataset.busy = String(busy); button.setAttribute('aria-busy', String(busy));
+  button.disabled = busy; if (label) button.textContent = label;
+}
+async function libraryAction(button, label, fn) {
+  if (libraryMutation) return;
+  libraryMutation = true; const text = button.textContent;
+  setButtonBusy(button, true, button.id === 'ptUploadControl' ? null : label);
+  if (button.id === 'ptUploadControl') $('ptUploadState').textContent = '正在上传并校验文件，请稍候…';
+  $('libraryGrid').inert = true; $('libraryGrid').dataset.locked = 'true';
+  $('libraryNewMenu').inert = true;
+  try { return await fn(); }
+  finally {
+    libraryMutation = false; setButtonBusy(button, false, button.id === 'ptUploadControl' ? null : text);
+    if (button.id === 'ptUploadControl') $('ptUploadState').textContent = '仅支持 .pt，最大 32 MB。替换后无法恢复旧音色。';
+    $('libraryGrid').inert = false; delete $('libraryGrid').dataset.locked; $('libraryNewMenu').inert = false;
+    renderMetadataState(); renderPreviewState();
+  }
+}
+function libraryView() { $('libraryNewMenu').open = false; $('voiceMoreMenu').open = false; }
+
 async function refreshLibrary() {
-  voiceAssets = await api('/api/voices/assets'); renderVoiceAssets();
-  await inventory(); if (data) { renderBindings(); renderLines(); }
+  if (libraryRefresh) return libraryRefresh;
+  libraryRefresh = (async () => {
+    setButtonBusy($('refreshVoiceLibrary'), true, '刷新中');
+    try {
+      const [assets, status, deletions] = await Promise.all([api('/api/voices/assets'), api('/api/voices/status'), api('/api/voices/deletions')]);
+      voiceAssets = assets; libraryEditable = status.editable; renderVoiceAssets();
+      $('libraryCount').textContent = `${new Set(assets.map(a => a.role)).size} 个角色 · ${assets.length} 个音色`;
+      $('voiceSource').textContent = `${config.tts_mode === 'gateway' ? 'Windows 音色库' : '本机音色库'} · ${status.message}`;
+      $('voiceSource').title = config.voice_source || '';
+      $('ptFile').disabled = !libraryEditable;
+      $('libraryNotice').hidden = true;
+      const pending = deletions.filter(i => i.status === 'pending');
+      $('remoteDeletionState').hidden = !pending.length;
+      $('remoteDeletionState').innerHTML = pending.length ? `${pending.length} 个 Windows 副本待删除：${pending.map(i => escape(`${i.role}/${i.emotion} ${i.error || ''}`)).join('；')} <button type="button" class="btn sm" id="retryRemoteDeletion">重试删除同步</button>` : '';
+      if (pending.length) $('retryRemoteDeletion').onclick = () => safe(() => queue('/api/voices/deletions/retry', {}));
+      await inventory(); if (data) { renderBindings(); renderLines(); }
+      renderMetadataState();
+    } catch (error) {
+      $('libraryNotice').hidden = false; $('libraryNotice').textContent = `加载失败：${error.message}。可点击上方「刷新」重试。`;
+      throw error;
+    } finally { setButtonBusy($('refreshVoiceLibrary'), false, '刷新'); }
+  })();
+  try { return await libraryRefresh; } finally { libraryRefresh = null; }
 }
 async function openLibrary(role = '') {
-  await refreshLibrary(); $('voiceSearch').value = role; renderVoiceAssets();
-  selectVoiceAsset(voiceAssets.find(v => !role || v.role === role) || null);
+  libraryView(); $('voiceSearch').value = role;
   $('libraryDialog').showModal();
+  $('libraryNotice').hidden = false; $('libraryNotice').textContent = '正在读取音色库…';
+  $('libraryNotice').dataset.busy = 'true'; $('libraryGrid').setAttribute('aria-busy', 'true');
+  try {
+    await refreshLibrary();
+    selectVoiceAsset(voiceAssets.find(v => !role || v.role === role) || null);
+  } finally { $('libraryNotice').dataset.busy = 'false'; $('libraryGrid').setAttribute('aria-busy', 'false'); }
 }
+const expandedVoiceRoles = new Set();
 function renderVoiceAssets() {
   const q = $('voiceSearch').value.trim().toLowerCase();
-  $('voiceAssets').innerHTML = voiceAssets.filter(a => `${a.role} ${a.emotion} ${a.notes}`.toLowerCase().includes(q)).map(a => `<button class="asset-item ${selectedAsset?.role === a.role && selectedAsset?.emotion === a.emotion ? 'selected' : ''}" data-asset-role="${escape(a.role)}" data-asset-emotion="${escape(a.emotion)}"><b>${escape(a.role)} <span class="muted">/ ${escape(a.emotion)}</span></b><small>${fmtBytes(a.bytes)} · ${a.usage.length ? `${a.usage.length} 处绑定` : '未绑定'}</small></button>`).join('') || '<p class="empty">没有匹配的 PT 文件。</p>';
+  const filtered = voiceAssets.filter(a => `${a.role} ${a.emotion} ${a.notes}`.toLowerCase().includes(q));
+  const roles = [...new Set(filtered.map(a => a.role))];
+  $('voiceAssets').innerHTML = roles.map(role => {
+    const children = filtered.filter(a => a.role === role);
+    const open = q || expandedVoiceRoles.has(role) || selectedAsset?.role === role;
+    return `<details class="asset-role-group" data-role-group="${escape(role)}" ${open ? 'open' : ''}><summary class="asset-role-heading"><b>${escape(role)}</b><span>${children.length} 个情绪</span></summary><div class="asset-emotions">${children.map(a => `<button type="button" class="asset-item ${selectedAsset?.role === a.role && selectedAsset?.emotion === a.emotion ? 'selected' : ''}" aria-pressed="${selectedAsset?.role === a.role && selectedAsset?.emotion === a.emotion}" data-asset-role="${escape(a.role)}" data-asset-emotion="${escape(a.emotion)}"><b>${escape(a.emotion)}</b><small>${a.usage.length ? `${a.usage.length} 处绑定` : '未绑定'}</small></button>`).join('')}</div></details>`;
+  }).join('') || `<p class="empty">${q ? '没有匹配的音色，试试其他关键词。' : '还没有音色。点击「新建音色」开始。'}</p>`;
+  $$('[data-role-group]', $('voiceAssets')).forEach(group => group.ontoggle = () => { if (group.open) expandedVoiceRoles.add(group.dataset.roleGroup); else expandedVoiceRoles.delete(group.dataset.roleGroup); });
   $$('[data-asset-role]', $('voiceAssets')).forEach(b => b.onclick = () => selectVoiceAsset(voiceAssets.find(a => a.role === b.dataset.assetRole && a.emotion === b.dataset.assetEmotion)));
 }
-function selectVoiceAsset(asset) {
-  selectedAsset = asset; renderVoiceAssets();
-  $('voiceDetailTitle').textContent = asset ? asset.filename : '导入新 PT';
-  $('assetRole').value = asset?.role || ''; $('assetEmotion').value = asset?.emotion || '平静';
+function addEmotion(role) {
+  if ([currentDesignTask,currentCreateTask].some(id => activeTask(lastTasks.find(t => t.id === id)?.status))) { toast('请等待当前音色生成完成后再添加情绪', true); return; }
+  referenceEditor.close(); referenceEditor.buffer = null; referenceId = ''; $('referenceEditor').hidden = true; $('voicePreview').hidden = true; $('voiceText').value = ''; $('voiceDescription').value = ''; setRef('为当前角色上传新情绪的参考音频，或录音 / 描述试音。');
+  $('libraryDialog').close(); $('voiceOverwrite').checked = false;
+  openFactory({role, emotion: ''}); $('voiceEmotion').focus();
+}
+function renderMetadataState() {
+  const changed = selectedAsset && ['role', 'emotion', 'ref_text', 'notes'].some((key, i) => $(['assetRole','assetEmotion','assetRefText','assetNotes'][i]).value !== (selectedAsset[key] || ''));
+  $('saveVoiceAsset').hidden = !selectedAsset;
+  $('saveVoiceAsset').disabled = libraryMutation || !changed || !libraryEditable || selectedAsset?.editable === false;
+  $('deletePT').disabled = libraryMutation || !libraryEditable || !selectedAsset || selectedAsset.editable === false;
+  $('ptFile').disabled = libraryMutation || !libraryEditable;
+  $('ptUploadControl').classList.toggle('disabled', $('ptFile').disabled);
+  $('ptUploadControl').setAttribute('aria-disabled', String($('ptFile').disabled));
+}
+function selectedPreview() {
+  return selectedAsset && [...previewTasks.values()].reverse().find(t => t.role === selectedAsset.role && t.emotion === selectedAsset.emotion && t.sha256 === selectedAsset.sha256);
+}
+function renderPreviewState() {
+  const state = selectedPreview(), busy = activeTask(state?.status);
+  const label = state?.status === 'submitting' ? '提交中…' : state?.status === 'queued' ? '排队中…' : state?.status === 'running' ? '生成中…' : '生成试听';
+  setButtonBusy($('previewPT'), busy, label);
+  $('previewPT').disabled = busy || !selectedAsset || libraryMutation;
+  $('assetPreviewText').disabled = busy;
+  $('assetPreviewProgress').hidden = !busy;
+  const cached = selectedAsset && previewAudio.get(JSON.stringify([selectedAsset.role,selectedAsset.emotion]));
+  const valid = cached && cached.sha256 === selectedAsset.sha256;
+  const el = $('assetPreviewState'); el.className = `preview-state ${busy ? 'running' : state?.status || ''}`;
+  el.textContent = state?.status === 'submitting' ? '正在提交试听请求…' : state?.status === 'queued' ? '等待音色服务，可切换音色或关闭窗口' : state?.status === 'running' ? '正在生成声音，完成后会显示播放器' : state?.status === 'failed' ? `生成失败：${state.error || '请重试'}` : ['paused','interrupted'].includes(state?.status) ? '试听已停止，可以重新生成' : valid ? '试听已就绪' : '生成后可在这里播放';
+  $('assetPreview').hidden = !valid || busy;
+  if (valid && $('assetPreview').getAttribute('src') !== cached.url) $('assetPreview').src = cached.url;
+}
+function selectVoiceAsset(asset, draft = {}) {
+  $('assetPreview').pause(); selectedAsset = asset; renderVoiceAssets();
+  $('voiceDetailTitle').textContent = asset ? `${asset.role} · ${asset.emotion}` : '导入音色';
+  $('voiceDetailSubtitle').textContent = asset ? 'VOICE / 音色详情' : 'NEW VOICE / 新建条目';
+  $('assetRole').value = asset?.role || draft.role || ''; $('assetEmotion').value = asset?.emotion || draft.emotion || '';
   $('assetRefText').value = asset?.ref_text || ''; $('assetNotes').value = asset?.notes || '';
-  $('assetInfo').textContent = asset ? `${fmtBytes(asset.bytes)} · SHA256 ${asset.sha256}` : '填写角色和情感，然后选择 PT 文件。';
-  $('assetUsage').textContent = asset?.usage.length ? `被 ${asset.usage.map(u => `${u.project}/${u.slot}`).join('、')} 绑定，先解除绑定才能删除或重命名。` : '参考台词和备注仅用于记录；修改它们不会重新训练 PT。';
-  $('assetExisting').hidden = !asset; $('saveVoiceAsset').disabled = !asset;
-  $('ptUploadLabel').textContent = asset ? '替换 PT 文件' : '导入 PT 文件';
-  $('assetPreview').hidden = true;
-  const cached = asset && previewAudio.get(JSON.stringify([asset.role,asset.emotion]));
-  if (cached?.sha256 === asset?.sha256 && cached) { $('assetPreview').src = cached.url; $('assetPreview').hidden = false; }
+  $('assetInfo').textContent = asset ? `${asset.filename} · ${fmtBytes(asset.bytes)}
+SHA256 ${asset.sha256}` : '';
+  $('assetUsage').textContent = asset?.usage.length ? `已用于 ${asset.usage.map(u => `${u.project}/${u.slot}`).join('、')}。重命名前需解除绑定，替换文件会使原配音失效。` : asset ? '尚未绑定工程。修改名称和备注不会改变声音；不同情绪需要独立音色。' : '填写角色与情感后导入 .pt 文件，或从「新建音色」录音 / 描述克隆。';
+  $('addRoleEmotion').hidden = !asset;
+  for (const id of ['assetExisting','voiceMoreMenu','voiceFileInfo','voiceDanger']) $(id).hidden = !asset;
+  $('voiceMetadata').open = !asset; $('voiceFileInfo').open = false; $('voiceMoreMenu').open = false;
+  $('voiceMetadataTitle').textContent = asset ? '编辑音色信息' : '填写音色信息';
+  $('ptUploadLabel').textContent = asset ? '替换 PT 文件' : '选择 PT 并导入';
+  $('ptUploadState').textContent = asset ? '替换后无法恢复旧音色。仅支持 .pt，最大 32 MB。' : '仅支持 .pt，最大 32 MB。文件上传后自动保存。';
+  $('assetPreviewText').value = selectedPreview()?.text || '你好，这是一段音色试听。';
   if (asset) $('downloadPT').href = assetURL(asset) + '/download';
+  renderMetadataState(); renderPreviewState();
+}
+function renderFactoryTasks() {
+  for (const [kind, id, taskId, normal] of [['design','designVoice',currentDesignTask,'按描述生成试音'],['create','createVoice',currentCreateTask,'克隆为 PT 音色']]) {
+    const status = factoryFinishing === kind ? 'processing' : factorySubmitting === kind ? 'submitting' : lastTasks.find(t => t.id === taskId)?.status;
+    const busy = activeTask(status) || status === 'processing';
+    setButtonBusy($(id), busy, busy ? status === 'processing' ? '处理音频中…' : status === 'running' ? '生成中…' : status === 'queued' ? '排队中…' : '提交中…' : normal);
+    $(id).disabled = busy || !!capture || (kind === 'create' && !referenceEditor.buffer);
+  }
+  const busy = !!factorySubmitting || !!factoryFinishing || referenceUploading || [currentDesignTask,currentCreateTask].some(id => activeTask(lastTasks.find(t => t.id === id)?.status));
+  for (const id of ['designVoice','createVoice']) $(id).disabled ||= busy;
+  referenceEditor.locked = busy || !!capture; referenceEditor.render();
+  for (const id of ['voiceFile','recordVoice']) $(id).disabled = busy || !!capture;
+  const syncing = syncSubmitting || lastTasks.some(t => !t.project && t.label === 'sync' && activeTask(t.status));
+  setButtonBusy($('syncVoices'), syncing, syncing ? '刷新中…' : '刷新音色库');
+  $('voiceFileLabel').dataset.busy = String(referenceUploading);
+  $('voiceFileLabel').classList.toggle('disabled', busy || !!capture);
+  $('voiceFileLabel').setAttribute('aria-disabled', String(busy || !!capture));
+  $('uploadReferenceLabel').textContent = referenceUploading ? '处理音频中…' : '上传参考音频';
+}
+async function submitFactory(kind) {
+  if (factorySubmitting || factoryFinishing || referenceUploading || [currentDesignTask,currentCreateTask].some(id => activeTask(lastTasks.find(t => t.id === id)?.status))) return;
+  if (!$('voiceRole').value.trim() || !$('voiceEmotion').value.trim()) throw Error('请填写角色名称与情绪名称');
+  if (kind === 'create' && !referenceEditor.buffer) throw Error('请先上传音频、录音或生成试音');
+  factorySubmitting = kind; renderFactoryTasks();
+  try {
+    if (kind === 'create') referenceId = (await referenceEditor.prepare()).reference_id;
+    const task = await api('/api/voices/actions', 'POST', voiceBody(kind));
+    toast(kind === 'create' ? '音色克隆已加入队列' : '描述试音已加入队列');
+    if (kind === 'design') { currentDesignTask = task.id; setRef('试音生成中，完成后可编辑波形…'); }
+    else { currentCreateTask = task.id; setRef('正在克隆音色，完成后会保存到音色库…'); }
+    taskStatus.set(task.id, 'queued'); lastTasks = [...lastTasks, task];
+    await pollTasks();
+  } catch (error) { setRef(`提交失败：${error.message}`); throw error; }
+  finally { factorySubmitting = ''; recordingControls(); renderFactoryTasks(); }
 }
 
 /* ───────── 多供应商 LLM ───────── */
@@ -463,23 +930,46 @@ async function saveLLM() {
 }
 
 /* ───────── 连接 ───────── */
-async function checkConnections() {
+async function checkConnections(notify = false) {
   if (connectionBusy) return;
   connectionBusy = true; $('checkConnections').disabled = true;
   try {
     const c = await api('/api/connections');
+    if (notify) toast(c.message || (c.ready ? '连接检测完成' : '连接尚未就绪'), !c.ready);
     $('connectionDot').textContent = c.mode === 'demo' ? '测试音' : c.ready ? '已连接' : '未就绪';
-    $('connectionDot').className = c.ready && c.mode !== 'demo' ? 'good' : 'bad';
+    $('connectionDot').className = `foot-state ${c.ready && c.mode !== 'demo' ? 'good' : 'bad'}`;
+    $('openConnections').dataset.state = c.mode === 'demo' ? 'demo' : c.ready ? 'ok' : 'bad';
     $('mode').classList.toggle('offline', !c.ready);
     $('connectionDetails').innerHTML = `<p class="${c.ready ? 'good' : 'bad'}">${escape(c.message)}</p><dl><dt>服务地址</dt><dd>${escape(c.url)}</dd><dt>Gateway</dt><dd>${escape(c.gateway)}</dd><dt>Windows Agent</dt><dd>${escape(c.worker_id)} · ${escape(c.worker)}</dd><dt>GPU 模型</dt><dd>${escape(c.model || '尚未就绪')} ${escape(c.device || '')}</dd><dt>检测耗时</dt><dd>${c.latency_ms} ms</dd></dl><p class="hint">自动每 30 秒检测。Windows 关机或模型加载时会显示未就绪，恢复后自动更新。</p>`;
+    if (c.mode === 'gateway' && c.worker === 'connected') {
+      try {
+        const caps = await api('/api/worker/capabilities');
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = caps.available ? `Windows 接口文档 · 协议 ${caps.document.protocol} · ${caps.rpc.length} 个 RPC` : caps.message;
+        details.append(summary);
+        if (caps.available) {
+          const hint = document.createElement('p'); hint.className = 'hint';
+          hint.textContent = caps.gateway_capabilities ? '能力发现路由已连接。音色编辑以 PT 管理接口实际返回为准。' : '已通过健康接口读取文档；Gateway 能力发现路由仍需升级。';
+          const pre = document.createElement('pre'); pre.textContent = JSON.stringify(caps.document, null, 2);
+          pre.style.cssText = 'max-height:360px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px';
+          details.append(hint, pre);
+        }
+        $('connectionDetails').append(details);
+      } catch (error) {
+        const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = `接口文档读取失败：${error.message}`;
+        $('connectionDetails').append(hint);
+      }
+    }
   } catch (error) {
-    $('connectionDot').textContent = '检测失败'; $('connectionDot').className = 'bad';
+    $('connectionDot').textContent = '检测失败'; $('connectionDot').className = 'foot-state bad'; $('openConnections').dataset.state = 'bad';
+    if (notify) toast(error.message, true);
     $('mode').classList.add('offline'); $('connectionDetails').textContent = `Mac 服务连接异常：${error.message}`;
   } finally { connectionBusy = false; $('checkConnections').disabled = false; }
 }
 
 /* ───────── 事件绑定 ───────── */
-$('new').onclick = $('welcomeNew').onclick = () => $('newDialog').showModal();
+$('new').onclick = $('welcomeNew').onclick = $('miniNew').onclick = () => $('newDialog').showModal();
 $('closeDialog').onclick = () => $('newDialog').close();
 $('newForm').onsubmit = event => {
   event.preventDefault();
@@ -487,15 +977,128 @@ $('newForm').onsubmit = event => {
     const fields = new FormData(event.target);
     const p = await api('/api/projects', 'POST', {name: fields.get('name'), topic: fields.get('topic'), keywords: fields.get('keywords').split(/[,，]/).map(v => v.trim()).filter(Boolean)});
     $('newDialog').close(); event.target.reset();
-    await selectProject(p.name);
+    await selectProject(p.name); toast('工程已创建');
   });
 };
 $('projectFilter').oninput = renderProjects;
+$('homeProjectFilter').oninput = renderHomeProjects;
+$('homeVoices').onclick = () => safe(() => openLibrary());
+$('homeLLM').onclick = () => $('openLLM').click();
 $('save').onclick = () => safe(async () => { await save(); toast('修改已保存'); });
 document.addEventListener('keydown', event => {
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); if (data) safe(async () => { await save(); toast('修改已保存'); }); }
+  if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+  const key = event.key.toLowerCase();
+  if (key === 's') { event.preventDefault(); if ($('promptDialog').open) savePrompts(); else if (data) safe(async () => { await save(); toast('修改已保存'); }); }
+  else if (key === 'b' && !document.querySelector('dialog[open]')) { event.preventDefault(); setSideCollapsed(!sideCollapsed); }
+  else if (key === 'j') { event.preventDefault(); setTerminal({hidden: !terminal.hidden}); }
 });
 ['topic', 'keywords', 'guidance', 'brief'].forEach(id => $(id).oninput = markDirty);
+
+/* ───────── 脚本提示词 ─────────
+   打开时记下快照；取消或 Esc 撤回到快照，“保存提示词”才写入工程。 */
+const PROMPT_HINTS = {
+  brief: '点“写对话草稿”时使用。人设和本次要求在草稿卡片里填写，这里只管写法。',
+  structure: '点“生成台词”时使用。实际请求由这份写法加上固定的 JSON 规范组成。',
+  contract: '每次生成台词都会自动附加，只读。两组完整的输入、输出示例演示草稿转换、长回答拆行和无草稿生成。',
+};
+let promptTab = 'brief', promptSnapshot = null;
+const promptCustom = key => $(`${key}Prompt`).value.trim() !== (config.script_prompts?.[key] || '').trim();
+function renderPromptState() {
+  for (const key of ['brief', 'structure']) {
+    const custom = promptCustom(key);
+    $(`${key}PromptState`).textContent = custom ? '已自定义' : '默认';
+    $(`${key}PromptState`).parentElement.classList.toggle('custom', custom);
+    document.querySelector(`[data-prompt-tab="${key}"]`).classList.toggle('custom', custom);
+  }
+  $$('[data-prompt-tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.promptTab === promptTab)));
+  $$('[data-prompt-pane]').forEach(p => p.hidden = p.dataset.promptPane !== promptTab);
+  $('promptHint').textContent = PROMPT_HINTS[promptTab];
+  const fixed = promptTab === 'contract';
+  const area = fixed ? $('structureContract') : $(`${promptTab}Prompt`);
+  const custom = !fixed && promptCustom(promptTab);
+  $('promptStatus').textContent = fixed ? '固定规范' : custom ? '已自定义' : '默认写法';
+  $('promptStatus').classList.toggle('custom', custom);
+  $('promptCount').textContent = fixed ? `${area.value.length.toLocaleString()} 字` : `${area.value.length.toLocaleString()} / 20,000 字`;
+  $('resetPrompt').hidden = fixed; $('resetPrompt').disabled = !custom;
+}
+function showPromptTab(tab) {
+  promptTab = tab; renderPromptState();
+  const area = tab === 'contract' ? $('structureContract') : $(`${tab}Prompt`);
+  area.scrollTop = 0; if ($('promptDialog').open) area.focus({preventScroll: true});
+}
+function openPrompts(tab = 'brief') {
+  if (!data) return;
+  promptSnapshot = {brief: $('briefPrompt').value, structure: $('structurePrompt').value};
+  $('promptDialog').showModal(); showPromptTab(tab);
+}
+const promptsChanged = () => !!promptSnapshot && ['brief', 'structure'].some(k => $(`${k}Prompt`).value !== promptSnapshot[k]);
+function cancelPrompts() {
+  if (promptsChanged() && !confirm('放弃对提示词的修改吗？')) return;
+  if (promptSnapshot) for (const k of ['brief', 'structure']) $(`${k}Prompt`).value = promptSnapshot[k];
+  promptSnapshot = null; $('promptDialog').close(); renderPromptState();
+}
+function savePrompts() {
+  const changed = promptsChanged();
+  promptSnapshot = null; $('promptDialog').close(); renderPromptState();
+  if (!changed) return;
+  markDirty();
+  safe(async () => { await save(); toast('提示词已保存，下次生成时生效'); });
+}
+$$('[data-open-prompt]').forEach(b => b.onclick = () => openPrompts(b.dataset.openPrompt));
+$$('[data-prompt-tab]').forEach(b => b.onclick = () => showPromptTab(b.dataset.promptTab));
+['briefPrompt', 'structurePrompt'].forEach(id => $(id).oninput = renderPromptState);
+$('resetPrompt').onclick = () => { $(`${promptTab}Prompt`).value = config.script_prompts[promptTab]; renderPromptState(); $(`${promptTab}Prompt`).focus(); };
+$('closePrompts').onclick = $('cancelPrompts').onclick = cancelPrompts;
+$('savePrompts').onclick = savePrompts;
+$('promptDialog').addEventListener('cancel', event => { event.preventDefault(); cancelPrompts(); });
+
+/* ───────── 布局：侧栏、分组与任务栏的折叠状态，记在本机 ───────── */
+const layout = store.get('layout', {side: false, rail: true, sections: {}});
+layout.sections ||= {};
+const narrowSide = matchMedia('(max-width: 860px)'), drawerRail = matchMedia('(max-width: 1180px)');
+let sideCollapsed = false, homeRail = false; // 主页任务栏默认收起，工程布局独立保留
+function setSideCollapsed(collapsed, remember = true) {
+  sideCollapsed = collapsed;
+  if (remember && !narrowSide.matches) layout.side = collapsed;
+  $('shell').classList.toggle('side-collapsed', collapsed);
+  $('sideToggle').setAttribute('aria-expanded', String(!collapsed));
+  $('sideToggle').title = collapsed ? '展开侧栏（⌘B）' : '折叠侧栏（⌘B）';
+  if (remember && !narrowSide.matches) store.set('layout', layout);
+  clearTimeout(growAll.t); growAll.t = setTimeout(growAll, 30);
+}
+function setSection(name, open, remember = true) {
+  const sec = document.querySelector(`.side-sec[data-sec="${name}"]`);
+  sec.classList.toggle('closed', !open);
+  sec.querySelector('.sec-toggle').setAttribute('aria-expanded', String(open));
+  layout.sections[name] = open; if (remember) store.set('layout', layout);
+}
+function railVisible() { return !current ? homeRail : drawerRail.matches ? $('shell').classList.contains('show-rail') : layout.rail; }
+function setRail(open) {
+  if (!current) homeRail = open;
+  else if (drawerRail.matches) $('shell').classList.toggle('show-rail', open);
+  else { layout.rail = open; store.set('layout', layout); }
+  applyRail();
+}
+function applyRail() {
+  if (!drawerRail.matches) $('shell').classList.remove('show-rail');
+  else if (!current) $('shell').classList.toggle('show-rail', homeRail);
+  $('shell').classList.toggle('rail-off', !current ? !homeRail : !layout.rail);
+  $('railToggle').setAttribute('aria-pressed', String(railVisible()));
+  clearTimeout(growAll.t); growAll.t = setTimeout(growAll, 30);
+}
+$('sideToggle').onclick = () => setSideCollapsed(!sideCollapsed);
+$$('.sec-toggle').forEach(b => b.onclick = () => { const sec = b.closest('.side-sec'); setSection(sec.dataset.sec, sec.classList.contains('closed')); });
+$$('[data-expand]').forEach(b => b.onclick = () => { setSideCollapsed(false); setSection(b.dataset.expand, true); });
+$('closeRail').onclick = () => setRail(false);
+drawerRail.addEventListener('change', applyRail);
+narrowSide.addEventListener('change', () => setSideCollapsed(narrowSide.matches || layout.side, false));
+// 窄屏下展开的侧栏浮在内容上方：点内容区或选中工程后自动收起
+document.querySelector('.main').addEventListener('pointerdown', () => { if (narrowSide.matches && !sideCollapsed) setSideCollapsed(true, false); });
+$('projects').addEventListener('click', () => { if (narrowSide.matches) setSideCollapsed(true, false); });
+setSideCollapsed(narrowSide.matches || layout.side, false);
+for (const name of ['projects', 'voices']) setSection(name, layout.sections[name] !== false, false);
+applyRail();
+
 $('addLine').onclick = () => {
   const last = data.script.lines.at(-1);
   const slots = data.script.cast.map(c => c.slot);
@@ -509,7 +1112,7 @@ $$('[data-tab]').forEach(b => b.onclick = () => switchTab(b.dataset.tab));
 $$('[data-action]').forEach(b => b.onclick = () => safe(() => action(b.dataset.action)));
 $$('[data-approve]').forEach(b => b.onclick = () => safe(() => approval(b.dataset.approve)));
 $('preflight').onclick = () => safe(async () => { await save(); renderReport(await api(url('/preflight'), 'POST', {})); toast('远端检查完成'); });
-$('railToggle').onclick = () => document.querySelector('.shell').classList.toggle('show-rail');
+$('railToggle').onclick = () => setRail(!railVisible());
 
 $('bgmFile').onchange = () => safe(async () => {
   for (const file of $('bgmFile').files) { const f = new FormData(); f.append('file', file); data.media = await api(url('/assets/bgm'), 'POST', f); }
@@ -521,51 +1124,122 @@ $('removeBgm').onclick = () => safe(async () => { data.media = await api(url('/m
 
 $('openFactory').onclick = openFactory;
 $$('[data-open-factory]').forEach(b => b.onclick = openFactory);
-$('closeFactory').onclick = () => { cancelRecording(); $('factoryDialog').close(); };
-$('factoryDialog').addEventListener('close', cancelRecording);
+$('closeFactory').onclick = () => $('factoryDialog').close();
+$('factoryDialog').addEventListener('close', () => { cancelRecording(); referenceEditor.close(); });
 $('recordVoice').onclick = () => safe(startRecording);
-$('stopRecording').onclick = () => { if (recorder?.state === 'recording') recorder.stop(); };
+$('stopRecording').onclick = stopRecording;
+$('cancelRecording').onclick = cancelRecording;
+$('refreshMicrophones').onclick = () => refreshMicrophones(true);
+navigator.mediaDevices?.addEventListener('devicechange', () => refreshMicrophones());
+window.addEventListener('pagehide', () => { cancelRecording(); referenceEditor.close(); });
 $('voiceFile').onchange = () => safe(async () => {
   const file = $('voiceFile').files[0]; if (!file) return;
   await useReference(file, `已上传 ${file.name}`); $('voiceFile').value = '';
 });
-$('designVoice').onclick = () => safe(async () => { await queue('/api/voices/actions', voiceBody('design')); setRef('试音生成中，完成后会在这里播放…'); });
-$('createVoice').onclick = () => safe(async () => { if (!referenceId) throw Error('请先上传参考音频或生成试音'); await queue('/api/voices/actions', voiceBody('create')); toast('音色固化任务已加入队列'); });
-$('syncVoices').onclick = () => safe(async () => { await queue('/api/voices/actions', {action: 'sync'}); toast('同步任务已加入队列'); });
+$$('[data-reference-method]').forEach(button => button.onclick = () => {
+  if (capture || factorySubmitting || factoryFinishing) { toast('请先结束当前录音或等待音频处理完成', true); return; }
+  const method = button.dataset.referenceMethod;
+  $$('[data-reference-method]').forEach(b => b.setAttribute('aria-pressed', String(b === button)));
+  $$('[data-reference-panel]').forEach(panel => panel.hidden = panel.dataset.referencePanel !== method);
+});
+$('designVoice').onclick = () => safe(() => submitFactory('design'));
+$('createVoice').onclick = () => safe(() => submitFactory('create'));
+$('syncVoices').onclick = () => safe(async () => {
+  if (syncSubmitting || lastTasks.some(t => !t.project && t.label === 'sync' && activeTask(t.status))) return;
+  syncSubmitting = true; renderFactoryTasks();
+  try { await queue('/api/voices/actions', {action: 'sync'}); toast('音色库刷新任务已加入队列'); }
+  finally { syncSubmitting = false; renderFactoryTasks(); }
+});
 
 $('openLibrary').onclick = () => safe(() => openLibrary());
 $('closeLibrary').onclick = () => $('libraryDialog').close();
 $('voiceSearch').oninput = renderVoiceAssets;
-$('newVoiceAsset').onclick = () => selectVoiceAsset(null);
-$('libraryCreate').onclick = () => { $('libraryDialog').close(); openFactory(); };
-$('voiceEditForm').onsubmit = event => { event.preventDefault(); safe(async () => {
-  if (!selectedAsset) return;
+$('newVoiceAsset').onclick = () => { libraryView(); selectVoiceAsset(null); $('assetRole').focus(); };
+$('refreshVoiceLibrary').onclick = () => safe(async () => {
+  if (libraryMutation) return;
+  const previous = selectedAsset; await refreshLibrary();
+  selectVoiceAsset(voiceAssets.find(a => a.role === previous?.role && a.emotion === previous?.emotion) || voiceAssets[0] || null);
+  toast('音色库已刷新');
+});
+for (const id of ['ptUploadControl','voiceFileLabel']) {
+  $(id).onkeydown = event => { if (['Enter',' '].includes(event.key)) { event.preventDefault(); const file = $(id).querySelector('input'); if (!file.disabled) file.click(); } };
+}
+$('downloadPT').onclick = () => toast('PT 文件已开始下载');
+$('downloadReference').onclick = () => safe(async () => { await referenceEditor.download(); toast('选区音频已开始下载'); });
+for (const id of ['assetRole','assetEmotion','assetRefText','assetNotes']) $(id).oninput = renderMetadataState;
+$('libraryCreate').onclick = () => { const target = selectedAsset ? {role: '', emotion: '平静'} : {role: $('assetRole').value, emotion: $('assetEmotion').value || '平静'}; $('libraryNewMenu').open = false; $('voiceOverwrite').checked = false; $('libraryDialog').close(); openFactory(target); };
+$('addRoleEmotion').onclick = () => addEmotion(selectedAsset.role);
+$('editBaseAudio').onclick = () => safe(async () => {
+  const asset = selectedAsset;
+  $('libraryDialog').close(); openFactory({role: asset.role, emotion: asset.emotion});
+  $('voiceText').value = asset.ref_text; $('voiceOverwrite').checked = true;
+  referenceId = ''; $('createVoice').disabled = true;
+  referenceEditor.close(); referenceEditor.buffer = null; $('referenceEditor').hidden = true;
+  if (!asset.has_reference) {
+    referenceEditor.close(); referenceEditor.buffer = null; $('referenceEditor').hidden = true;
+    $('voicePreview').hidden = true; referenceId = ''; $('createVoice').disabled = true;
+    setRef('此 PT 没有保存参考音频，请上传原始录音或直接录音，再裁剪克隆。'); return;
+  }
+  referenceUploading = true; renderFactoryTasks(); setRef('正在读取参考音频…');
+  try {
+    const result = await api('/api/voices/reference', 'POST', await referenceForm(assetURL(asset) + '/reference', 'reference.wav'));
+    await referenceEditor.load(result, `${asset.role}/${asset.emotion} 参考音频`);
+    setRef('参考音频已加载，可试听或调整选区，然后直接克隆。');
+  } catch (error) { setRef(`参考音频加载失败：${error.message}`); throw error; }
+  finally { referenceUploading = false; renderFactoryTasks(); }
+});
+$('voiceEditForm').onsubmit = event => { event.preventDefault(); safe(() => libraryAction($('saveVoiceAsset'), '保存中…', async () => {
+  if (!selectedAsset || !libraryEditable) return;
   const updated = await api(assetURL(selectedAsset), 'PUT', {role: $('assetRole').value, emotion: $('assetEmotion').value, ref_text: $('assetRefText').value, notes: $('assetNotes').value});
   await refreshLibrary(); selectVoiceAsset(updated); toast('音色信息已更新');
-}); };
+})); };
 $('ptFile').onchange = () => safe(async () => {
   const file = $('ptFile').files[0]; if (!file) return;
+  if (!$('voiceEditForm').reportValidity()) { $('ptFile').value = ''; return; }
+  await libraryAction($('ptUploadControl'), '上传中…', async () => {
   try {
     const f = new FormData(); f.append('file', file); f.append('role', selectedAsset?.role || $('assetRole').value); f.append('emotion', selectedAsset?.emotion || $('assetEmotion').value); f.append('overwrite', String(!!selectedAsset));
     f.append('ref_text', $('assetRefText').value); f.append('notes', $('assetNotes').value);
-    const result = await api('/api/voices/import', 'POST', f); await refreshLibrary(); selectVoiceAsset(result); toast('PT 已保存；配音前会自动同步到 Windows');
+    const result = await api('/api/voices/import', 'POST', f); await refreshLibrary(); selectVoiceAsset(result); toast(config.tts_mode === 'gateway' ? 'PT 已保存到 Windows，Mac 缓存已校验更新' : 'PT 已保存到本机 Qwen 音色库');
   } finally { $('ptFile').value = ''; }
+  });
 });
 $('deletePT').onclick = () => safe(async () => {
-  if (!selectedAsset) return;
-  await api(assetURL(selectedAsset), 'DELETE'); await refreshLibrary(); selectVoiceAsset(null); toast('已删除，可从备份恢复');
+  const asset = selectedAsset;
+  if (!asset || libraryMutation) return;
+  const usage = asset.usage.length ? `\n将同时解除 ${asset.usage.length} 处工程绑定。` : '';
+  if (!confirm(`确认删除「${asset.role} · ${asset.emotion}」吗？删除后无法恢复。${usage}`)) return;
+  await libraryAction($('deletePT'), '删除中…', async () => {
+    if (dirty) await save();
+    const result = await api(assetURL(asset) + '?detach=true', 'DELETE');
+    await refreshLibrary(); selectVoiceAsset(voiceAssets.find(a => a.role === asset.role) || null);
+    if (current && !dirty) await selectProject(current, {keepTab:true});
+    toast(result.remote_status === 'pending' ? '音色已删除，Windows 副本仍待同步；请重试删除同步。' : '音色已删除');
+  });
 });
 $('previewPT').onclick = () => safe(async () => {
-  if (!selectedAsset) return;
-  const target = {role: selectedAsset.role, emotion: selectedAsset.emotion, sha256: selectedAsset.sha256};
-  const task = await api('/api/voices/actions', 'POST', {action: 'preview', role: target.role, emotion: target.emotion, text: $('assetPreviewText').value});
-  previewTasks.set(task.id, target); taskStatus.set(task.id, 'queued');
-  await pollTasks(); toast('试听任务已排队');
+  if (!selectedAsset || activeTask(selectedPreview()?.status)) return;
+  const text = $('assetPreviewText').value.trim(); if (!text) throw Error('请填写试听台词');
+  const target = {role: selectedAsset.role, emotion: selectedAsset.emotion, sha256: selectedAsset.sha256, text, status: 'submitting'};
+  const pending = `submitting:${JSON.stringify([target.role,target.emotion,target.sha256])}`;
+  previewTasks.set(pending, target); renderPreviewState();
+  try {
+    const task = await api('/api/voices/actions', 'POST', {action: 'preview', role: target.role, emotion: target.emotion, text});
+    previewTasks.delete(pending); target.status = task.status; previewTasks.set(task.id, target);
+    store.set('voicePreviewTasks', [...previewTasks]); taskStatus.set(task.id, 'queued');
+    renderPreviewState(); toast('音色试听已加入队列'); await pollTasks();
+  } catch (error) {
+    if (previewTasks.has(pending)) { target.status = 'failed'; target.error = error.message; }
+    renderPreviewState(); throw error;
+  }
 });
-$('showVoiceTrash').onclick = () => safe(async () => {
-  const items = await api('/api/voices/trash'); $('voiceTrash').hidden = !$('voiceTrash').hidden;
-  $('voiceTrash').innerHTML = '<h3>删除与替换备份</h3>' + (items.map(i => `<div class="trash-row"><span>${escape(i.role)} / ${escape(i.emotion)} · ${i.reason === 'deleted' ? '删除' : '替换'}${i.created_at ? ` · ${escape(new Date(i.created_at).toLocaleString())}` : ''}</span><button class="btn sm" data-restore="${escape(i.id)}">恢复</button></div>`).join('') || '<p class="hint">暂无备份。</p>');
-  $$('[data-restore]').forEach(b => b.onclick = () => safe(async () => { const asset = await api(`/api/voices/trash/${b.dataset.restore}/restore`, 'POST', {}); await refreshLibrary(); selectVoiceAsset(asset); toast('已恢复。'); }));
+// 点击其他位置、Escape 或选择操作后收起操作菜单。
+$('libraryDialog').addEventListener('click', event => {
+  for (const id of ['libraryNewMenu','voiceMoreMenu']) if (!$(id).contains(event.target)) $(id).open = false;
+});
+$('libraryDialog').addEventListener('cancel', event => {
+  const menu = ['libraryNewMenu','voiceMoreMenu'].map($).find(el => el.open);
+  if (menu) { event.preventDefault(); menu.open = false; }
 });
 $('openLLM').onclick = () => safe(async () => { llmDraft = await api('/api/llm/config'); renderLLM(); $('llmDialog').showModal(); });
 $('closeLLM').onclick = () => $('llmDialog').close();
@@ -575,9 +1249,77 @@ $('addLLMProvider').onclick = () => {
 };
 $('saveLLM').onclick = () => safe(saveLLM);
 $('testLLM').onclick = () => safe(async () => { await saveLLM(); await queue('/api/llm/test', {provider_id: llmDraft.active_provider}); $('llmTestState').textContent = '模型连接测试中…'; });
-$('openConnections').onclick = () => { $('connectionDialog').showModal(); checkConnections(); };
+$('openConnections').onclick = () => { $('ttsMode').value = config.tts_mode === 'direct' ? 'direct' : 'gateway'; $('connectionDialog').showModal(); checkConnections(); };
 $('closeConnections').onclick = () => $('connectionDialog').close();
-$('checkConnections').onclick = checkConnections;
+$('checkConnections').onclick = () => checkConnections(true);
+$('saveTTSMode').onclick = () => safe(async () => {
+  if (dirty) await save();
+  config = await api('/api/tts/mode', 'POST', {mode: $('ttsMode').value, local_url: $('localQwenURL').value});
+  $('mode').textContent = config.tts_mode === 'gateway' ? '远端 Windows' : '本机 Qwen';
+  referenceEditor.close(); referenceEditor.buffer = null; referenceId = ''; $('referenceEditor').hidden = true; $('createVoice').disabled = true;
+  await checkConnections(); await refreshLibrary();
+  if (current) await selectProject(current, {keepTab:true});
+  toast(`已切换：${config.voice_source}`);
+});
+
+/* ───────── 终端：可拖动、可折叠、可隐藏，位置记在本机 ───────── */
+const terminal = store.get('terminal', {hidden: false, open: false, right: 16, bottom: 16});
+function clampTerminal() {
+  const el = $('terminal'); if (el.hidden) return;
+  const maxRight = Math.max(8, innerWidth - el.offsetWidth - 8), maxBottom = Math.max(8, innerHeight - el.offsetHeight - 8);
+  terminal.right = Math.min(Math.max(8, terminal.right), maxRight);
+  terminal.bottom = Math.min(Math.max(8, terminal.bottom), maxBottom);
+  el.style.right = terminal.right + 'px'; el.style.bottom = terminal.bottom + 'px';
+}
+function setTerminal(patch = {}, remember = true) {
+  Object.assign(terminal, patch);
+  const el = $('terminal');
+  el.hidden = terminal.hidden; el.classList.toggle('collapsed', !terminal.open);
+  $('terminalBody').hidden = !terminal.open;
+  $('toggleTerminal').setAttribute('aria-expanded', String(terminal.open));
+  $('showTerminal').setAttribute('aria-pressed', String(!terminal.hidden));
+  $('terminalState').textContent = terminal.hidden ? '已隐藏' : '';
+  clampTerminal(); if (remember) store.set('terminal', terminal);
+  if (!terminal.hidden && terminal.open) refreshRuntime();
+}
+async function refreshRuntime() {
+  if (runtimeBusy) return;
+  runtimeBusy = true;
+  try {
+    const r = await api('/api/runtime'), c = r.connection, m = r.metrics;
+    $('terminalBadge').textContent = c.ready ? `${c.worker_id || '本机'} 已就绪` : '未就绪';
+    $('terminal').dataset.state = c.ready ? 'ok' : 'bad';
+    const lines = [`[${new Date().toLocaleTimeString()}] ${config.tts_mode === 'gateway' ? 'Windows / Gateway' : '本机 Qwen'} ${c.url}`, `连接: ${c.gateway} · Worker: ${c.worker} · ${c.message}`, `模型: ${c.model || '未加载'} · ${c.device || '未知设备'}`];
+    if (m) {
+      lines.push(`CPU ${m.cpu_percent ?? '未知'}% · RAM ${m.memory_used_mb ?? '未知'} / ${m.memory_total_mb ?? '未知'} MB`);
+      for (const gpu of m.gpus || []) lines.push(`${gpu.name}: GPU ${gpu.utilization_percent}% · VRAM ${gpu.memory_used_mb}/${gpu.memory_total_mb} MB · ${gpu.temperature_c}°C`);
+      lines.push(`Windows 队列: ${m.queue_depth ?? '未知'} · 运行任务: ${m.current_job_id || '空闲'}`);
+      for (const log of m.logs || []) lines.push(`[Windows] ${log}`);
+    } else lines.push(`资源监控: ${r.metrics_status}`);
+    for (const t of r.tasks.slice(-8)) lines.push(`[${TASK_STATES[t.status] || t.status}] ${TASK_LABELS[t.label] || t.label} ${t.project || ''} · ${taskDetail(t)}${t.error ? ` · ${t.error}` : ''}`);
+    $('terminalOutput').textContent = lines.join('\n');
+  } catch (e) { $('terminalOutput').textContent = `状态读取失败: ${e.message}`; $('terminal').dataset.state = 'bad'; $('terminalBadge').textContent = '读取失败'; }
+  finally { runtimeBusy = false; clampTerminal(); }
+}
+$('toggleTerminal').onclick = () => setTerminal({open: !terminal.open});
+$('hideTerminal').onclick = () => setTerminal({hidden: true});
+$('showTerminal').onclick = () => setTerminal({hidden: !terminal.hidden});
+$('refreshTerminal').onclick = refreshRuntime;
+$('terminalHead').ondblclick = event => { if (!event.target.closest('button')) setTerminal({open: !terminal.open}); };
+$('terminalHead').onpointerdown = event => {
+  if (event.button || event.target.closest('button')) return;
+  const head = $('terminalHead'), el = $('terminal');
+  const start = {x: event.clientX, y: event.clientY, right: terminal.right, bottom: terminal.bottom};
+  head.setPointerCapture(event.pointerId);
+  head.onpointermove = move => {
+    el.classList.add('dragging');
+    terminal.right = start.right - (move.clientX - start.x); terminal.bottom = start.bottom - (move.clientY - start.y);
+    clampTerminal();
+  };
+  head.onpointerup = head.onpointercancel = () => { head.onpointermove = head.onpointerup = head.onpointercancel = null; el.classList.remove('dragging'); store.set('terminal', terminal); };
+};
+window.addEventListener('resize', clampTerminal);
+setTerminal({}, false);
 
 window.addEventListener('resize', () => { clearTimeout(growAll.t); growAll.t = setTimeout(growAll, 100); });
 window.addEventListener('beforeunload', event => { if (dirty) { event.preventDefault(); event.returnValue = ''; } });
@@ -585,14 +1327,23 @@ window.addEventListener('beforeunload', event => { if (dirty) { event.preventDef
 /* ───────── 启动 ───────── */
 safe(async () => {
   config = await api('/api/config');
-  $('mode').textContent = config.tts_mode === 'demo' ? '测试模式 · 非真实配音' : config.tts_mode === 'gateway' ? '网关模式' : 'Qwen 直连模式';
+  $('mode').textContent = config.tts_mode === 'demo' ? '测试模式' : config.tts_mode === 'gateway' ? '网关模式' : 'Qwen 直连';
   $('mode').classList.toggle('demo', config.tts_mode === 'demo');
+  $('openConnections').title = config.tts_mode === 'demo' ? '连接状态：测试模式，非真实配音' : '连接状态';
   $('llmLabel').textContent = config.llm_configured ? '已配置' : '未配置';
   checkConnections();
-  await inventory(); await pollTasks();
+  await inventory({includeVoices: false}); await pollTasks();
   const requested = new URLSearchParams(location.search).get('project');
-  if (projectsCache.length) await selectProject(projectsCache.find(p => p.name === requested)?.name || projectsCache[0].name);
-  else $('welcome').hidden = false;
+  if (requested && projectsCache.some(p => p.name === requested)) await selectProject(requested);
+  else { await showHome(); if (requested) toast('这个工程已不存在，已返回主页。'); }
+  $('voiceInventory').innerHTML = '<div class="empty">音色库加载中…</div>';
+  safe(async () => {
+    try { await inventory(); if (data) renderBindings(); }
+    catch {
+      $('voiceInventory').innerHTML = '<div class="empty">音色库暂不可用，可继续编辑脚本。</div>';
+    }
+  });
   setInterval(() => safe(pollTasks), 2000);
   setInterval(() => { if (!document.hidden) checkConnections(); }, 30000);
+  refreshRuntime(); setInterval(() => { if (!document.hidden && !terminal.hidden && terminal.open) refreshRuntime(); }, 5000);
 });

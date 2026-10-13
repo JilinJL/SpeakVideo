@@ -5,6 +5,7 @@ import json
 import uuid
 
 from .config import Settings
+from .script.prompts import DEFAULT_PERSONAS
 from .script.schema import Script, VoiceBinding
 from .storage import read_json, safe_name, sha256, write_json
 
@@ -26,8 +27,7 @@ class Project:
                 "template": "duo_dialogue",
                 "meta": {"topic": topic, "keywords": keywords or [], "brief": ""},
                 "cast": [
-                    {"slot": "p1", "persona": "理性克制的主持人"},
-                    {"slot": "p2", "persona": "犀利幽默的嘉宾"},
+                    {"slot": slot, "persona": persona} for slot, persona in DEFAULT_PERSONAS.items()
                 ],
                 "lines": [],
             },
@@ -68,13 +68,26 @@ class Project:
         return result
 
     def digest(self, gate: str) -> str:
+        # Writing controls affect future generations, not the reviewed dialogue.
+        # Excluding the new field also preserves approvals on legacy projects.
+        script_data = self.script().model_dump(exclude={"meta": {"prompts"}})
         if gate == "script":
-            data = self.script().model_dump()
+            data = script_data
         elif gate == "binding":
             data = {
-                "script": self.script().model_dump(),
+                "script": script_data,
                 "cast": {k: v.model_dump() for k, v in self.cast().items()},
                 "voices": self.voice_digests(),
+                "source": {
+                    "mode": self.settings.tts.mode,
+                    "endpoint": self.settings.tts.base_url,
+                    "worker_id": self.settings.tts.worker_id
+                    if self.settings.tts.mode == "gateway"
+                    else None,
+                    "local_pt_root": str(self.settings.tts.local_pt_root)
+                    if self.settings.tts.mode == "direct"
+                    else None,
+                },
             }
         elif gate == "audio":
             metadata = read_json(self.root / "exports/audio.json")
@@ -83,6 +96,17 @@ class Project:
                 "signature": metadata["signature"],
                 "mix": read_json(self.root / "media.json", {}),
                 "master": sha256(self.root / "exports" / metadata["files"]["master.wav"]["path"]),
+            }
+        elif gate == "video":
+            from .video import video_signature
+
+            metadata = read_json(self.root / "exports/video.json")
+            data = {
+                "audio": self.digest("audio"),
+                "signature": metadata["signature"],
+                "current_signature": video_signature(self),
+                "settings": read_json(self.root / "video.json", {}),
+                "video": sha256(self.root / "exports" / metadata["files"]["final.mp4"]["path"]),
             }
         else:
             raise ValueError("未知确认阶段")
@@ -112,9 +136,21 @@ class Project:
 
             if not audio_current(self):
                 raise ValueError("音频已过期、缺失或损坏，请先重新合并混音")
+        if gate == "video":
+            from .video import video_current
+
+            if not video_current(self):
+                raise ValueError("成片已过期、缺失或损坏，请先重新合成视频")
+            if not all(self.approved(g) for g in ("script", "binding", "audio")):
+                raise ValueError("请先完成剧本、音色绑定与完整音频确认")
         state = read_json(self.root / "workflow.json", {"approvals": {}})
         state["approvals"][gate] = self.digest(gate)
-        state["stage"] = {"script": "binding_review", "binding": "ready", "audio": "complete"}[gate]
+        state["stage"] = {
+            "script": "binding_review",
+            "binding": "ready",
+            "audio": "complete",
+            "video": "delivery_ready",
+        }[gate]
         write_json(self.root / "workflow.json", state)
 
     def save(self, script: Script, cast: dict[str, VoiceBinding]) -> None:

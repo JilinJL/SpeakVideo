@@ -203,7 +203,11 @@ func (g *gateway) rpc(r *http.Request, kind string, data message, timeout time.D
 }
 
 func readJSON(w http.ResponseWriter, r *http.Request) (message, error) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+	limit := int64(maxBody)
+	if r.URL.Path == "/v1/voices/manage" {
+		limit = 48 << 20
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	var data message
 	dec := json.NewDecoder(r.Body)
 	err := dec.Decode(&data)
@@ -235,11 +239,16 @@ func (g *gateway) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/worker/ws", g.websocket)
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
-		m, err := g.rpc(r, "worker.health", message{}, 10*time.Second)
+		includeDocs := r.URL.Query().Get("include_docs") != "false"
+		m, err := g.rpc(r, "worker.health", message{"include_docs": includeDocs}, 10*time.Second)
 		if err != nil {
-			reply(w, 503, message{"ready": false, "worker_id": g.workerID, "detail": err.Error()})
+			g.mu.Lock()
+			connected := g.active != nil
+			g.mu.Unlock()
+			reply(w, 503, message{"ready": false, "worker_connected": connected, "worker_id": g.workerID, "detail": err.Error()})
 			return
 		}
+		m["worker_connected"] = true
 		code := 200
 		if m["ready"] != true {
 			code = 503
@@ -248,10 +257,31 @@ func (g *gateway) handler() http.Handler {
 		delete(m, "type")
 		reply(w, code, m)
 	})
+	mux.HandleFunc("GET /v1/worker/capabilities", func(w http.ResponseWriter, r *http.Request) {
+		m, err := g.rpc(r, "worker.capabilities", message{}, 10*time.Second)
+		if err != nil {
+			failure(w, 503, err)
+			return
+		}
+		if _, ok := m["result"].(map[string]any); !ok {
+			failure(w, 502, errors.New("worker returned invalid interface document"))
+			return
+		}
+		// Keep the RPC envelope and correlation ID; callers read result for the document.
+		reply(w, 200, m)
+	})
 	mux.HandleFunc("GET /v1/voices", func(w http.ResponseWriter, r *http.Request) {
 		m, err := g.rpc(r, "voice.list", message{}, 30*time.Second)
 		if err != nil {
 			failure(w, 502, err)
+			return
+		}
+		reply(w, 200, m["result"])
+	})
+	mux.HandleFunc("GET /v1/worker/metrics", func(w http.ResponseWriter, r *http.Request) {
+		m, err := g.rpc(r, "worker.metrics", message{}, 8*time.Second)
+		if err != nil {
+			failure(w, 503, err)
 			return
 		}
 		reply(w, 200, m["result"])
@@ -276,6 +306,38 @@ func (g *gateway) handler() http.Handler {
 		_, _ = w.Write(data)
 	})
 	mux.HandleFunc("POST /v1/voices/sync", g.syncVoices)
+	mux.HandleFunc("POST /v1/voices/manage", func(w http.ResponseWriter, r *http.Request) {
+		value, err := readJSON(w, r)
+		if err != nil {
+			failure(w, 400, err)
+			return
+		}
+		switch str(value, "action") {
+		case "list", "trash", "restore", "reference", "import", "edit", "delete":
+		default:
+			failure(w, 400, errors.New("unknown voice action"))
+			return
+		}
+		m, err := g.rpc(r, "voice.manage", message{"payload": value}, 5*time.Minute)
+		if err != nil {
+			failure(w, 502, err)
+			return
+		}
+		reply(w, 200, m["result"])
+	})
+	mux.HandleFunc("DELETE /v1/voices", func(w http.ResponseWriter, r *http.Request) {
+		value, err := readJSON(w, r)
+		if err != nil || !safeName.MatchString(str(value, "role")) || !safeName.MatchString(str(value, "emotion")) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(str(value, "sha256")) {
+			failure(w, 400, errors.New("invalid voice deletion"))
+			return
+		}
+		m, err := g.rpc(r, "voice.delete", value, 30*time.Second)
+		if err != nil {
+			failure(w, 502, err)
+			return
+		}
+		reply(w, 200, m["result"])
+	})
 	mux.HandleFunc("POST /v1/voices/create", func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 		reader, err := r.MultipartReader()

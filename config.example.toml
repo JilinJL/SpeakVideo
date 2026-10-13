@@ -1,7 +1,9 @@
 # Copy to config.local.toml. Secrets belong in environment variables.
 [tts]
-mode = "direct" # direct (existing qwen server), gateway (P6), demo (test tones)
+mode = "direct" # direct (local Qwen), gateway (Windows via WSS), demo (test tones)
 base_url = "http://127.0.0.1:8001"
+# Optional: actual local Qwen PT directory. If omitted, discover via /api/pt/list.
+# local_pt_root = "/home/example/crafts/qwen3-tts-base-web/pt"
 worker_id = "example-worker" # Required routing target in gateway mode.
 timeout_seconds = 300
 job_timeout_seconds = 1800
@@ -17,7 +19,7 @@ json_mode = true
 timeout_seconds = 180
 
 [script]
-max_line_chars = 100
+max_line_chars = 200
 
 [audio]
 master_lufs = -16

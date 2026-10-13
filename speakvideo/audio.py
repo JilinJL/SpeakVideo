@@ -49,7 +49,7 @@ def audio_signature(project: Project, options: dict) -> str:
         ],
         "audio_settings": project.settings.audio.model_dump(),
         "mix": {**options, "bgm_sha256": sha256(Path(options["bgm"])) if options["bgm"] else None},
-        "pipeline_version": 1,
+        "pipeline_version": 2,
     }
     return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
@@ -119,7 +119,14 @@ def assemble(
                 check=True,
             ).stdout
             frames = len(pcm) // 2
-            pause_frames = round(line.pause_after_ms * rate / 1000)
+            record = manifest["lines"][line.id]
+            # Keep batch interiors continuous; the model already reads their punctuation.
+            pause_ms = (
+                0
+                if record.get("group_id") and not record.get("group_tail")
+                else line.pause_after_ms
+            )
+            pause_frames = round(pause_ms * rate / 1000)
             silence = bytes(pause_frames * 2)
             combined.writeframes(pcm + silence)
             for slot, stream in stems.items():
@@ -137,6 +144,8 @@ def assemble(
                     "start_frame": cursor,
                     "end_frame": cursor + frames,
                     "pause_frames": pause_frames,
+                    "alignment": record.get("alignment", "line"),
+                    "group_id": record.get("group_id"),
                 }
             )
             subtitles.append(f"{index}\n{srt_time(start)} --> {srt_time(end)}\n{line.words}\n")

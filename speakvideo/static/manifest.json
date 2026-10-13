@@ -1,0 +1,32 @@
+{
+  "name": "SpeakVideo 音频工作台",
+  "short_name": "SpeakVideo",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "description": "把两个人的对话写成台词、配上声音、合成完整音频的本机工作台。",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f1f2f4",
+  "theme_color": "#f1f2f4",
+  "icons": [
+    {
+      "src": "/brand/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/brand/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/brand/logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

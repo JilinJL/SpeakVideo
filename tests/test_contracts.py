@@ -100,7 +100,11 @@ def test_two_step_engine_preserves_original_brief(project):
 
         def complete(self, system, user, *, json_output=False):
             self.calls.append(json_output)
-            return script.model_dump_json() if json_output else "原样阐述\n带包袱"
+            return (
+                json.dumps({**script.model_dump(), "meta": {}})
+                if json_output
+                else "原样阐述\n带包袱"
+            )
 
     provider = Provider()
     engine = ScriptEngine(provider)
@@ -112,8 +116,8 @@ def test_two_step_engine_preserves_original_brief(project):
 
 
 def test_voice_bundle_checksums(project):
+    assets = VoiceStore(project.settings).assets()
     project.settings.tts.mode = "gateway"
-    store = VoiceStore(project.settings)
     with TTSClient(project.settings) as client:
 
         def handler(request):
@@ -130,7 +134,7 @@ def test_voice_bundle_checksums(project):
         client._client = httpx.Client(
             base_url="http://test", transport=httpx.MockTransport(handler)
         )
-        store.verify_remote(client, {("讲述者", "平静"), ("回应者", "平静")})
+        assert len(client.sync_voices(assets)["voices"]) == 2
 
 
 def test_gateway_rejects_cross_origin_audio(project):
@@ -169,6 +173,7 @@ def test_gateway_accepts_full_sha256_job_id_and_rejects_path_traversal(project):
 
 def test_voice_factory_uses_upload_path_and_downloads_pt(project, tmp_path):
     project.settings.tts.mode = "direct"
+    project.settings.tts.local_pt_root = project.settings.paths.voices
     reference = tmp_path / "ref.wav"
     reference.write_bytes(b"reference-bytes")
     paths = []
