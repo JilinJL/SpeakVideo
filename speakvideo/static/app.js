@@ -107,6 +107,7 @@ async function inventory({includeVoices = true} = {}) {
   $('voiceInventory').innerHTML = Object.entries(voices).map(([role, emotions]) =>
     `<details class="inventory-role" data-inventory-role="${escape(role)}" ${opened.has(role) ? 'open' : ''}><summary><span>${escape(role)}</span><small>${emotions.length} 个情绪</small></summary><div class="inventory-emotions">${emotions.map(emotion => `<button class="voice" data-voice-role="${escape(role)}" data-voice-emotion="${escape(emotion)}">${escape(emotion)}</button>`).join('')}</div></details>`).join('')
     || '<div class="empty">还没有音色。点上方 + 去音色工厂创建。</div>';
+  $$('[data-inventory-role]', $('voiceInventory')).forEach(group => group.querySelector('summary').onclick = event => { event.preventDefault(); safe(() => openLibrary(group.dataset.inventoryRole)); });
   $$('[data-voice-role]', $('voiceInventory')).forEach(b => b.onclick = () => safe(async () => { await openLibrary(b.dataset.voiceRole); selectVoiceAsset(voiceAssets.find(a => a.role === b.dataset.voiceRole && a.emotion === b.dataset.voiceEmotion)); }));
 
 }
@@ -560,12 +561,13 @@ async function pollTasks() {
   const tasks = await api('/api/tasks');
   lastTasks = tasks;
   renderTasks();
-  let refresh = false, homeChanged = false;
+  let refresh = false, homeChanged = false, historyChanged = false;
   for (const t of tasks) {
     const prev = taskStatus.get(t.id);
     if (prev !== t.status && t.project) homeChanged = true;
     if (taskStatus.has(t.id) && prev !== t.status) {
       if (t.project === current && ['succeeded', 'failed', 'paused'].includes(t.status)) refresh = true;
+      if (t.status === 'succeeded' && ['design','preview','create'].includes(t.label)) historyChanged = true;
       if (t.status === 'succeeded' && t.label !== 'create') toast(`${TASK_LABELS[t.label] || t.label}已完成${t.label === 'llm_test' && t.result ? `：${t.result}` : ''}`);
       if (['paused','interrupted'].includes(t.status)) toast(`${TASK_LABELS[t.label] || t.label}${TASK_STATES[t.status]}`);
       if (t.status === 'failed') toast(`${TASK_LABELS[t.label] || t.label}失败：${t.error || ''}`, true);
@@ -575,7 +577,7 @@ async function pollTasks() {
           try {
             const result = await api('/api/voices/reference', 'POST', await referenceForm(`/api/previews/${t.result}`, 'design.wav'));
             await referenceEditor.load(result, '描述生成试音');
-            setRef('试音已生成，可试听或调整选区，然后直接克隆。');
+            setRef('', true);
           } catch (error) { setRef(`试听音频加载失败：${error.message}，可重新生成试音。`); toast(error.message, true); }
           finally { factoryFinishing = ''; renderFactoryTasks(); }
         }
@@ -602,7 +604,7 @@ async function pollTasks() {
     if (homeChanged) await refreshHome();
   }
   store.set('voicePreviewTasks', [...previewTasks].filter(([id]) => !id.startsWith('submitting:')).slice(-50));
-  renderPreviewState(); renderFactoryTasks();
+  renderPreviewState(); renderFactoryTasks(); if (historyChanged) await refreshVoiceHistory();
   // 运行中也同步行状态，让进度点实时变化
   const running = tasks.some(t => t.project === current && t.status === 'running');
   if ((refresh || running) && !dirty && current) {
@@ -613,35 +615,35 @@ async function pollTasks() {
 }
 
 /* ───────── 音色工厂 ───────── */
-function setRef(text, ready = false) { $('referenceState').textContent = text; $('referenceState').classList.toggle('ready', ready); }
+function setRef(text, ready = false) { $('referenceState').textContent = text; $('referenceState').hidden = !/(正在|生成中|克隆|失败|提交中|处理中)/.test(text) || ready; }
 function voiceBody(kind) { return {action: kind, role: $('voiceRole').value, emotion: $('voiceEmotion').value, text: $('voiceText').value, instruct: $('voiceDescription').value, reference_id: referenceId, overwrite: $('voiceOverwrite').checked}; }
 function openFactory(target = {}) {
   if (typeof target.role === 'string') $('voiceRole').value = target.role;
   if (typeof target.emotion === 'string') $('voiceEmotion').value = target.emotion;
-  $('factoryDialog').showModal(); referenceEditor.render(); refreshMicrophones(); renderFactoryTasks();
+  $('factoryDialog').showModal(); referenceEditor.render(); refreshMicrophones(); renderFactoryTasks(); safe(refreshVoiceHistory);
 }
 
-const referenceEditor = new ReferenceEditor({request: api, onError: error => toast(error.message, true), onChange: result => {
+const referenceEditor = new ReferenceEditor({request: api, onPlay: () => $$('audio').forEach(audio => audio.pause()), onError: error => toast(error.message, true), onChange: result => {
   referenceId = result?.reference_id || '';
   $('createVoice').disabled = !result || !!capture;
-  if (result) setRef(`当前选区 ${result.duration.toFixed(2)} 秒，可直接克隆。参考台词须对应选区内容。`, true);
-  else setRef('上传音频、录音或按描述生成试音后即可克隆。');
+  if (result) setRef('', true);
+  else setRef('');
   renderFactoryTasks();
 }});
 async function referenceForm(source, filename) {
-  const response = await fetch(source); if (!response.ok) throw Error('参考音频无法读取');
+  const response = await fetch(source); if (!response.ok) throw Error('角色原声无法读取');
   const form = new FormData(); form.append('file', await response.blob(), filename); return form;
 }
 
 async function useReference(file, label) {
   if (referenceUploading) return;
-  referenceUploading = true; referenceEditor.pending = true; referenceEditor.render(); renderFactoryTasks(); setRef('正在上传并处理参考音频…');
+  referenceUploading = true; referenceEditor.pending = true; referenceEditor.render(); renderFactoryTasks(); setRef('正在上传并处理角色原声…');
   try {
     const f = new FormData(); f.append('file', file);
     const result = await api('/api/voices/reference', 'POST', f);
     currentDesignTask = ''; await referenceEditor.load(result, label);
-    setRef('参考音频已就绪，可直接克隆；需要裁剪时拖动波形选区。', true); toast('参考音频已加载');
-  } catch (error) { setRef(`参考音频处理失败：${error.message}`); throw error; }
+    setRef('', true); toast('角色原声已加载');
+  } catch (error) { setRef(`角色原声处理失败：${error.message}`); throw error; }
   finally { referenceUploading = false; referenceEditor.pending = false; referenceEditor.render(); renderFactoryTasks(); }
 }
 function recordingControls() {
@@ -694,7 +696,7 @@ function finishRecording(session) {
   if (session.frames && session.peak >= .00001) file = pcmFile(session);
   releaseCapture(session); capture = null; $('liveWave').hidden = true; recordingControls();
   if (!file) { toast('未采集到声音，请检查麦克风、静音和系统权限后重录。', true); return; }
-  safe(async () => { await useReference(file, '直接 PCM 录音'); $('recordingTime').textContent = session.peak < .001 ? '录音音量偏低，请先试听' : '录音已就绪，可直接克隆'; });
+  safe(async () => { await useReference(file, '直接 PCM 录音'); $('recordingTime').textContent = session.peak < .001 ? '录音音量偏低，请先试听' : '录音已保存'; });
 }
 function stopRecording() {
   if (!capture?.recording || capture.stopping) return;
@@ -793,7 +795,7 @@ async function refreshLibrary() {
       $('remoteDeletionState').hidden = !pending.length;
       $('remoteDeletionState').innerHTML = pending.length ? `${pending.length} 个 Windows 副本待删除：${pending.map(i => escape(`${i.role}/${i.emotion} ${i.error || ''}`)).join('；')} <button type="button" class="btn sm" id="retryRemoteDeletion">重试删除同步</button>` : '';
       if (pending.length) $('retryRemoteDeletion').onclick = () => safe(() => queue('/api/voices/deletions/retry', {}));
-      await inventory(); if (data) { renderBindings(); renderLines(); }
+      await inventory(); await refreshVoiceHistory(); if (data) { renderBindings(); renderLines(); }
       renderMetadataState();
     } catch (error) {
       $('libraryNotice').hidden = false; $('libraryNotice').textContent = `加载失败：${error.message}。可点击上方「刷新」重试。`;
@@ -820,14 +822,19 @@ function renderVoiceAssets() {
   $('voiceAssets').innerHTML = roles.map(role => {
     const children = filtered.filter(a => a.role === role);
     const open = q || expandedVoiceRoles.has(role) || selectedAsset?.role === role;
-    return `<details class="asset-role-group" data-role-group="${escape(role)}" ${open ? 'open' : ''}><summary class="asset-role-heading"><b>${escape(role)}</b><span>${children.length} 个情绪</span></summary><div class="asset-emotions">${children.map(a => `<button type="button" class="asset-item ${selectedAsset?.role === a.role && selectedAsset?.emotion === a.emotion ? 'selected' : ''}" aria-pressed="${selectedAsset?.role === a.role && selectedAsset?.emotion === a.emotion}" data-asset-role="${escape(a.role)}" data-asset-emotion="${escape(a.emotion)}"><b>${escape(a.emotion)}</b><small>${a.usage.length ? `${a.usage.length} 处绑定` : '未绑定'}</small></button>`).join('')}</div></details>`;
+    return `<details class="asset-role-group" data-role-group="${escape(role)}" ${open ? 'open' : ''}><summary class="asset-role-heading"><button type="button" class="role-chevron" data-role-toggle aria-label="展开或收起 ${escape(role)}">›</button><b>${escape(role)}</b><span>${children.length} 个情绪</span></summary><div class="asset-emotions">${children.map(a => `<button type="button" class="asset-item ${selectedAsset?.role === a.role && selectedAsset?.emotion === a.emotion ? 'selected' : ''}" aria-pressed="${selectedAsset?.role === a.role && selectedAsset?.emotion === a.emotion}" data-asset-role="${escape(a.role)}" data-asset-emotion="${escape(a.emotion)}"><b>${escape(a.emotion)}</b><small>${a.usage.length ? `${a.usage.length} 处绑定` : '未绑定'}</small></button>`).join('')}</div></details>`;
   }).join('') || `<p class="empty">${q ? '没有匹配的音色，试试其他关键词。' : '还没有音色。点击「新建音色」开始。'}</p>`;
+  $$('[data-role-group]', $('voiceAssets')).forEach(group => group.querySelector('summary').onclick = event => {
+    event.preventDefault(); const role = group.dataset.roleGroup;
+    if (event.target.closest('[data-role-toggle]')) { group.open = !group.open; if (group.open) expandedVoiceRoles.add(role); else expandedVoiceRoles.delete(role); return; }
+    expandedVoiceRoles.add(role); selectVoiceAsset(filtered.find(a => a.role === role));
+  });
   $$('[data-role-group]', $('voiceAssets')).forEach(group => group.ontoggle = () => { if (group.open) expandedVoiceRoles.add(group.dataset.roleGroup); else expandedVoiceRoles.delete(group.dataset.roleGroup); });
   $$('[data-asset-role]', $('voiceAssets')).forEach(b => b.onclick = () => selectVoiceAsset(voiceAssets.find(a => a.role === b.dataset.assetRole && a.emotion === b.dataset.assetEmotion)));
 }
 function addEmotion(role) {
   if ([currentDesignTask,currentCreateTask].some(id => activeTask(lastTasks.find(t => t.id === id)?.status))) { toast('请等待当前音色生成完成后再添加情绪', true); return; }
-  referenceEditor.close(); referenceEditor.buffer = null; referenceId = ''; $('referenceEditor').hidden = true; $('voicePreview').hidden = true; $('voiceText').value = ''; $('voiceDescription').value = ''; setRef('为当前角色上传新情绪的参考音频，或录音 / 描述试音。');
+  referenceEditor.close(); referenceEditor.buffer = null; referenceId = ''; $('referenceEditor').hidden = true; $('voicePreview').hidden = true; $('voiceText').value = ''; $('voiceDescription').value = ''; setRef('');
   $('libraryDialog').close(); $('voiceOverwrite').checked = false;
   openFactory({role, emotion: ''}); $('voiceEmotion').focus();
 }
@@ -874,7 +881,7 @@ SHA256 ${asset.sha256}` : '';
   $('ptUploadState').textContent = asset ? '替换后无法恢复旧音色。仅支持 .pt，最大 32 MB。' : '仅支持 .pt，最大 32 MB。文件上传后自动保存。';
   $('assetPreviewText').value = selectedPreview()?.text || '你好，这是一段音色试听。';
   if (asset) $('downloadPT').href = assetURL(asset) + '/download';
-  renderMetadataState(); renderPreviewState();
+  renderMetadataState(); renderPreviewState(); renderVoiceHistory();
 }
 function renderFactoryTasks() {
   for (const [kind, id, taskId, normal] of [['design','designVoice',currentDesignTask,'按描述生成试音'],['create','createVoice',currentCreateTask,'克隆为 PT 音色']]) {
@@ -892,11 +899,12 @@ function renderFactoryTasks() {
   $('voiceFileLabel').dataset.busy = String(referenceUploading);
   $('voiceFileLabel').classList.toggle('disabled', busy || !!capture);
   $('voiceFileLabel').setAttribute('aria-disabled', String(busy || !!capture));
-  $('uploadReferenceLabel').textContent = referenceUploading ? '处理音频中…' : '上传参考音频';
+  $('uploadReferenceLabel').textContent = referenceUploading ? '处理音频中…' : '上传角色原声';
 }
 async function submitFactory(kind) {
   if (factorySubmitting || factoryFinishing || referenceUploading || [currentDesignTask,currentCreateTask].some(id => activeTask(lastTasks.find(t => t.id === id)?.status))) return;
   if (!$('voiceRole').value.trim() || !$('voiceEmotion').value.trim()) throw Error('请填写角色名称与情绪名称');
+  if (!$('voiceText').value.trim()) throw Error('请填写对应台词');
   if (kind === 'create' && !referenceEditor.buffer) throw Error('请先上传音频、录音或生成试音');
   factorySubmitting = kind; renderFactoryTasks();
   try {
@@ -910,6 +918,72 @@ async function submitFactory(kind) {
   } catch (error) { setRef(`提交失败：${error.message}`); throw error; }
   finally { factorySubmitting = ''; recordingControls(); renderFactoryTasks(); }
 }
+
+/* Durable auditions retain every take, including voices later replaced. */
+let voiceHistory = [], voiceHistoryRefresh = null;
+const PREVIEW_KINDS = {preview: 'PT 试听', design: '描述试音', original: '角色原声'};
+async function refreshVoiceHistory() {
+  if (voiceHistoryRefresh) return voiceHistoryRefresh;
+  voiceHistoryRefresh = (async () => {
+    voiceHistory = await api('/api/voices/previews');
+    const seen = new Set();
+    for (const entry of voiceHistory) {
+      if (entry.kind !== 'preview' || !entry.voice_sha256) continue;
+      const key = JSON.stringify([entry.role,entry.emotion]);
+      if (!seen.has(key)) { previewAudio.set(key, {sha256:entry.voice_sha256,url:entry.audio_url}); seen.add(key); }
+    }
+    renderVoiceHistory(); renderPreviewState();
+  })();
+  try { await voiceHistoryRefresh; } finally { voiceHistoryRefresh = null; }
+}
+function renderVoiceHistory() {
+  const factoryRole = $('voiceRole').value.trim(), emotion = $('voiceEmotion').value.trim();
+  const search = $('voiceHistorySearch').value.trim().toLowerCase();
+  for (const [id, entries] of [
+    ['assetHistory', voiceHistory.filter(p => p.role === selectedAsset?.role && p.emotion === selectedAsset?.emotion)],
+    ['factoryHistory', voiceHistory.filter(p => !factoryRole || p.role === factoryRole && (!emotion || p.emotion === emotion))],
+    ['allVoiceHistory', voiceHistory.filter(p => !search || `${p.role} ${p.emotion} ${p.text}`.toLowerCase().includes(search))],
+  ]) {
+    const host = $(id);
+    // Keep an existing player alive during background refreshes.
+    const signature = JSON.stringify([entries.map(p => p.id), selectedAsset?.role, selectedAsset?.emotion, selectedAsset?.sha256]);
+    if (host.dataset.entries === signature) continue;
+    host.dataset.entries = signature;
+    host.querySelectorAll('audio').forEach(audio => audio.pause());
+    host.innerHTML = entries.map(entry => {
+      const outdated = entry.kind === 'preview' && selectedAsset?.role === entry.role && selectedAsset?.emotion === entry.emotion && entry.voice_sha256 && entry.voice_sha256 !== selectedAsset.sha256;
+      return `<article class="preview-take"><div class="preview-take-head"><b>${escape(entry.role || '历史试听')}${entry.emotion ? ` · ${escape(entry.emotion)}` : ''}</b><span>${PREVIEW_KINDS[entry.kind] || '试听'}${outdated ? ' · 旧版音色' : ''}</span></div><time>${escape(new Date(entry.created_at).toLocaleString())} · ${fmtTime(entry.duration)}</time>${entry.text ? `<p class="preview-take-text">${escape(entry.text)}</p>` : ''}<audio controls preload="none" src="${escape(entry.audio_url)}" aria-label="${escape(entry.role || '历史试听')} ${escape(PREVIEW_KINDS[entry.kind] || '')}"></audio><div class="row"><a class="btn ghost sm" href="${escape(entry.audio_url)}" download="${escape(entry.role || '试听')}-${entry.id}.wav">下载</a><button type="button" class="btn ghost sm" data-use-preview="${escape(entry.id)}">用作角色原声</button><button type="button" class="btn ghost sm" data-record-preview="${escape(entry.id)}">重新录音</button></div></article>`;
+    }).join('') || '<p class="empty">暂无试听记录</p>';
+    $$('a[download]', host).forEach(link => link.onclick = () => toast('试听音频已开始下载'));
+    $$('[data-record-preview]', host).forEach(button => button.onclick = () => safe(() => recordVoiceAgain(button.dataset.recordPreview)));
+    $$('[data-use-preview]', host).forEach(button => button.onclick = () => safe(() => useVoicePreview(button.dataset.usePreview)));
+  }
+}
+function recordVoiceAgain(id) {
+  if (referenceUploading || capture || [currentDesignTask,currentCreateTask].some(task => activeTask(lastTasks.find(t => t.id === task)?.status))) throw Error('请等待当前录音或生成结束');
+  const entry = voiceHistory.find(p => p.id === id); if (!entry) return;
+  $('voiceHistoryDialog').close(); $('libraryDialog').close();
+  referenceEditor.close(); referenceEditor.buffer = null; referenceId = ''; $('referenceEditor').hidden = true;
+  $('voiceText').value = entry.text || ''; $('voiceOverwrite').checked = !!voices[entry.role]?.includes(entry.emotion);
+  if (!$('factoryDialog').open) openFactory({role:entry.role,emotion:entry.emotion || '平静'});
+  else { $('voiceRole').value = entry.role; $('voiceEmotion').value = entry.emotion || '平静'; }
+  $('factoryDialog').querySelector('[data-reference-method="record"]').click(); renderFactoryTasks();
+}
+async function useVoicePreview(id) {
+  if (referenceUploading || capture || [currentDesignTask,currentCreateTask].some(task => activeTask(lastTasks.find(t => t.id === task)?.status))) throw Error('请等待当前录音或生成结束');
+  const entry = voiceHistory.find(p => p.id === id); if (!entry) return;
+  const wasOpen = $('factoryDialog').open;
+  $('voiceHistoryDialog').close(); $('libraryDialog').close();
+  if (!wasOpen) { $('voiceOverwrite').checked = false; openFactory({role:entry.role,emotion:entry.emotion || '平静'}); }
+  const form = await referenceForm(entry.audio_url, 'original.wav');
+  await useReference(form.get('file'), '试听原声'); $('voiceText').value = entry.text || ''; renderFactoryTasks();
+}
+$('openVoiceHistory').onclick = () => safe(async () => { $('voiceHistoryDialog').showModal(); await refreshVoiceHistory(); });
+$('closeVoiceHistory').onclick = () => $('voiceHistoryDialog').close();
+$('voiceHistorySearch').oninput = renderVoiceHistory;
+for (const id of ['voiceRole','voiceEmotion']) $(id).addEventListener('input', renderVoiceHistory);
+for (const id of ['voiceHistoryDialog','libraryDialog','factoryDialog']) $(id).addEventListener('close', () => { $(id).querySelectorAll('audio').forEach(audio => audio.pause()); });
+document.addEventListener('play', event => { if (event.target instanceof HTMLAudioElement) { $$('audio').forEach(audio => { if (audio !== event.target) audio.pause(); }); referenceEditor.stop(); } }, true);
 
 /* ───────── 多供应商 LLM ───────── */
 function renderLLM() {
@@ -1178,14 +1252,14 @@ $('editBaseAudio').onclick = () => safe(async () => {
   if (!asset.has_reference) {
     referenceEditor.close(); referenceEditor.buffer = null; $('referenceEditor').hidden = true;
     $('voicePreview').hidden = true; referenceId = ''; $('createVoice').disabled = true;
-    setRef('此 PT 没有保存参考音频，请上传原始录音或直接录音，再裁剪克隆。'); return;
+    setRef('此 PT 没有保存角色原声，请上传原始录音或直接录音，再裁剪克隆。'); return;
   }
-  referenceUploading = true; renderFactoryTasks(); setRef('正在读取参考音频…');
+  referenceUploading = true; renderFactoryTasks(); setRef('正在读取角色原声…');
   try {
     const result = await api('/api/voices/reference', 'POST', await referenceForm(assetURL(asset) + '/reference', 'reference.wav'));
-    await referenceEditor.load(result, `${asset.role}/${asset.emotion} 参考音频`);
-    setRef('参考音频已加载，可试听或调整选区，然后直接克隆。');
-  } catch (error) { setRef(`参考音频加载失败：${error.message}`); throw error; }
+    await referenceEditor.load(result, `${asset.role}/${asset.emotion} 角色原声`);
+    setRef('', true);
+  } catch (error) { setRef(`角色原声加载失败：${error.message}`); throw error; }
   finally { referenceUploading = false; renderFactoryTasks(); }
 });
 $('voiceEditForm').onsubmit = event => { event.preventDefault(); safe(() => libraryAction($('saveVoiceAsset'), '保存中…', async () => {

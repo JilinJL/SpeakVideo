@@ -838,3 +838,16 @@ audio { width: 100%; height: 40px; }
 .inventory-role > summary small { margin-left: auto; font-size: 10px; color: var(--muted); }
 .inventory-emotions { margin: 2px 8px 5px 16px; padding-left: 8px; border-left: 1px solid var(--line); }
 .inventory-emotions .voice { font-size: 11px; padding: 5px 6px; }
+.preview-history-list { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+.preview-take { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--sunken); }
+.preview-take-head { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.preview-take-head span, .preview-take time { font-size: 11px; color: var(--muted); }
+.preview-take-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.preview-take audio { width: 100%; height: 38px; }
+.preview-history-list:empty { display: none; }
+#allVoiceHistory { min-height: 160px; }
+.wave-area { cursor: pointer; }
+#factoryHistory { max-height: 320px; overflow: auto; }
+.asset-role-heading::before { content: none; }
+.role-chevron { border: 0; background: transparent; color: var(--muted); padding: 0 4px; font-size: 18px; cursor: pointer; }
+.asset-role-group[open] .role-chevron { transform: rotate(90deg); }

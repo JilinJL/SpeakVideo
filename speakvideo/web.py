@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -39,6 +39,7 @@ from .video import (
     video_config,
     video_current,
 )
+from .voice_previews import VoicePreviews
 from .voices import VoiceStore
 from .workflow import advance, extend_brief, generate_brief, generate_script
 
@@ -73,6 +74,19 @@ class VoiceAction(BaseModel):
     reference_id: str = ""
     overwrite: bool = False
 
+    @model_validator(mode="after")
+    def require_voice_inputs(self):
+        if self.action in {"create", "design", "preview"}:
+            self.text = self.text.strip()
+            if not self.text:
+                raise ValueError("请填写对应台词" if self.action != "preview" else "请填写试听台词")
+        if self.action == "create":
+            import re
+
+            if not re.fullmatch(r"[a-f0-9]{32}\.wav", self.reference_id):
+                raise ValueError("请提供角色原声")
+        return self
+
 
 class VoiceEdit(BaseModel):
     role: str
@@ -104,6 +118,8 @@ def create_app(settings: Settings) -> FastAPI:
     remote_inventory_cache = {"at": 0.0, "assets": [], "status": {}}
     capabilities_cache = {"at": 0.0, "value": {}}
     task_context = threading.local()
+    voice_previews = VoicePreviews(settings.paths.root)
+    voice_previews.migrate(settings.paths.cache)
 
     def task_progress(**fields):
         item = task_context.item
@@ -227,8 +243,8 @@ def create_app(settings: Settings) -> FastAPI:
             persist()
             try:
                 result = fn(events[key].is_set)
+                final_status = "paused" if events[key].is_set() else "succeeded"
                 item.update(
-                    status="paused" if events[key].is_set() else "succeeded",
                     result=(
                         f"已生成视频 · {result['duration']:.1f} 秒"
                         if label == "render" and isinstance(result, dict)
@@ -251,7 +267,8 @@ def create_app(settings: Settings) -> FastAPI:
                     ),
                 )
             except Exception as exc:
-                item.update(status="paused" if events[key].is_set() else "failed", error=str(exc))
+                final_status = "paused" if events[key].is_set() else "failed"
+                item["error"] = str(exc)
             finally:
                 if item.get("progress", {}).get("kind") == "lines" and project_name:
                     item["progress"] = line_progress(item)
@@ -259,6 +276,7 @@ def create_app(settings: Settings) -> FastAPI:
                 item.setdefault("progress", {})["stage"] = (
                     item.get("error") or item.get("result") or "已停止"
                 )
+                item["status"] = final_status
                 persist()
 
         executor.submit(execute)
@@ -548,7 +566,7 @@ def create_app(settings: Settings) -> FastAPI:
         store.detail(role, emotion)
         path = store.path(role, emotion).with_suffix(".wav")
         if not path.is_file():
-            raise HTTPException(404, "此 PT 没有保存参考音频，请重新上传或录音")
+            raise HTTPException(404, "此 PT 没有保存角色原声，请重新上传或录音")
         return FileResponse(path, media_type="audio/wav")
 
     @app.get("/api/projects")
@@ -797,13 +815,39 @@ def create_app(settings: Settings) -> FastAPI:
     @app.post("/api/voices/reference")
     async def upload_reference(file: UploadFile = File(...)):
         suffix = Path(file.filename or "").suffix.lower()
-        if suffix not in {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac", ".webm"}:
-            raise ValueError("不支持的参考音频")
+        if suffix not in {
+            ".wav",
+            ".mp3",
+            ".m4a",
+            ".flac",
+            ".ogg",
+            ".aac",
+            ".webm",
+            ".mp4",
+            ".mov",
+            ".mkv",
+            ".avi",
+            ".m4v",
+            ".mpg",
+            ".mpeg",
+            ".ts",
+            ".mts",
+            ".m2ts",
+            ".opus",
+            ".aiff",
+            ".aif",
+            ".wma",
+            ".amr",
+            ".3gp",
+            ".ogv",
+            ".mka",
+        }:
+            raise ValueError("不支持的角色原声格式，请上传音频或视频文件")
         content = await file.read(50 * 1024 * 1024 + 1)
         if len(content) > 50 * 1024 * 1024:
-            raise ValueError("参考音频上限 50 MB")
+            raise ValueError("角色原声上限 50 MB")
         if not content:
-            raise ValueError("参考音频为空")
+            raise ValueError("角色原声为空")
         stem = uuid.uuid4().hex
         source, target = (
             settings.paths.cache / (stem + ".upload" + suffix),
@@ -819,6 +863,8 @@ def create_app(settings: Settings) -> FastAPI:
                     source,
                     "-t",
                     "121",
+                    "-map",
+                    "0:a:0",
                     "-vn",
                     "-ac",
                     "1",
@@ -832,7 +878,7 @@ def create_app(settings: Settings) -> FastAPI:
             )
             _, duration = wav_info(target.read_bytes())
             if duration > 120:
-                raise ValueError("参考音频请控制在 120 秒以内")
+                raise ValueError("角色原声请控制在 120 秒以内")
         except Exception:
             target.unlink(missing_ok=True)
             raise
@@ -856,13 +902,15 @@ def create_app(settings: Settings) -> FastAPI:
                     return "已刷新本机 Qwen 实际 PT 目录"
                 if body.action == "design":
                     result = client.synthesize_design(text=body.text, instruct=body.instruct)
-                    key = uuid.uuid4().hex + ".wav"
-                    atomic_bytes(settings.paths.cache / key, result.wav_bytes)
-                    write_json(
-                        settings.paths.cache / (key + ".json"),
-                        {"text": body.text, "instruct": body.instruct},
+                    entry = voice_previews.save(
+                        result.wav_bytes,
+                        kind="design",
+                        role=body.role,
+                        emotion=body.emotion,
+                        text=body.text,
+                        instruct=body.instruct,
                     )
-                    return key
+                    return entry["id"] + ".wav"
                 if body.action == "preview":
                     if not body.text.strip():
                         raise ValueError("请填写试听台词")
@@ -887,9 +935,17 @@ def create_app(settings: Settings) -> FastAPI:
                         result = client.synthesize(
                             text=body.text, role=body.role, emotion=body.emotion
                         )
-                    key = uuid.uuid4().hex + ".wav"
-                    atomic_bytes(settings.paths.cache / key, result.wav_bytes)
-                    return key
+                    from .storage import sha256
+
+                    entry = voice_previews.save(
+                        result.wav_bytes,
+                        kind="preview",
+                        role=body.role,
+                        emotion=body.emotion,
+                        text=body.text,
+                        voice_sha256=sha256(store.path(body.role, body.emotion)),
+                    )
+                    return entry["id"] + ".wav"
                 if body.action == "create":
                     # Only use a previously uploaded/generated reference, never arbitrary local paths.
                     ref = Path(body.reference_id)
@@ -899,10 +955,10 @@ def create_app(settings: Settings) -> FastAPI:
                         or any(c not in "0123456789abcdef" for c in ref.stem)
                         or not (settings.paths.cache / ref).is_file()
                     ):
-                        raise ValueError("参考音频不存在")
+                        raise ValueError("角色原声不存在")
                     preview = read_json(settings.paths.cache / (ref.name + ".json"))
                     if preview and "text" in preview and preview["text"] != body.text:
-                        raise ValueError("固化台词必须与试音台词一致")
+                        raise ValueError("对应台词必须与试音台词一致")
                     result = voice_store().create(
                         client,
                         settings.paths.cache / ref,
@@ -910,6 +966,13 @@ def create_app(settings: Settings) -> FastAPI:
                         body.emotion,
                         body.text,
                         body.overwrite,
+                    )
+                    voice_previews.save(
+                        (settings.paths.cache / ref).read_bytes(),
+                        kind="original",
+                        role=body.role,
+                        emotion=body.emotion,
+                        text=body.text,
                     )
                     if settings.tts.mode == "gateway":
                         inventory_assets(True)
@@ -922,7 +985,7 @@ def create_app(settings: Settings) -> FastAPI:
     def crop_reference(body: ReferenceCrop):
         source = settings.paths.cache / body.reference_id
         if not source.is_file():
-            raise ValueError("参考音频不存在")
+            raise ValueError("角色原声不存在")
         key = uuid.uuid4().hex + ".wav"
         target = settings.paths.cache / key
         with wave.open(str(source), "rb") as reader:
@@ -976,11 +1039,26 @@ def create_app(settings: Settings) -> FastAPI:
         events[key].set()
         return {"pause_requested": True}
 
+    @app.get("/api/voices/previews")
+    def voice_preview_history():
+        return voice_previews.entries()
+
+    @app.get("/api/voices/previews/{key}/audio")
+    def voice_preview_audio(key: str):
+        path = voice_previews.path(key)
+        if not path.is_file():
+            raise HTTPException(404, "试听记录不存在")
+        return FileResponse(
+            path, media_type="audio/wav", filename=f"{key}.wav", content_disposition_type="inline"
+        )
+
     @app.get("/api/previews/{filename}")
     def preview(filename: str):
         if not filename.endswith(".wav") or Path(filename).name != filename:
             raise HTTPException(404)
         p = settings.paths.cache / filename
+        if not p.is_file() and len(Path(filename).stem) == 32:
+            p = voice_previews.path(Path(filename).stem)
         if not p.is_file():
             raise HTTPException(404)
         return FileResponse(p, media_type="audio/wav")

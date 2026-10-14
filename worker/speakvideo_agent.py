@@ -241,6 +241,8 @@ class SpeakVideoAgent(Agent):
                         result.raise_for_status()
                         response["result"] = result.json()
                     elif kind == "voice.create":
+                        if not str(message["metadata"].get("ref_text", "")).strip():
+                            raise ValueError("角色原声必须提供对应台词")
                         payload = dict(
                             message["metadata"],
                             ref_audio="",

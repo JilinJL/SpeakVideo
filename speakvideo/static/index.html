@@ -20,7 +20,7 @@
 <link rel="icon" href="/brand/logo-small.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
 <link rel="manifest" href="/manifest.json">
-<link rel="stylesheet" href="/style.css?v=20261014-ui">
+<link rel="stylesheet" href="/style.css?v=20261014-source">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -289,15 +289,15 @@
 <dialog id="factoryDialog" class="dialog factory-dialog">
   <div class="dialog-head"><h2>音色工厂</h2><button id="closeFactory" class="icon-btn" aria-label="关闭"><svg class="ico" aria-hidden="true"><use href="#i-x"/></svg></button></div>
   <div class="dialog-body">
-  <p class="hint">直接录音、上传参考音频，或用文字描述生成试音；满意后固化为 pt 音色。</p>
+
   <div class="grid-2">
     <label class="field">角色名称<input id="voiceRole" list="voiceRoleOptions" placeholder="选择已有角色，或输入新角色"></label>
     <label class="field">情绪名称<input id="voiceEmotion" list="voiceEmotionOptions" value="平静"></label>
   </div>
-  <div class="seg factory-methods" aria-label="参考音频来源"><button type="button" data-reference-method="upload" aria-pressed="true">上传音频</button><button type="button" data-reference-method="record" aria-pressed="false">直接录音</button><button type="button" data-reference-method="design" aria-pressed="false">描述试音</button></div>
+  <div class="seg factory-methods" aria-label="角色原声来源"><button type="button" data-reference-method="upload" aria-pressed="true">上传原声</button><button type="button" data-reference-method="record" aria-pressed="false">直接录音</button><button type="button" data-reference-method="design" aria-pressed="false">描述试音</button></div>
   <label class="field" data-reference-panel="design" hidden>想要怎样的声音？<input id="voiceDescription" placeholder="例如：青年女性，声音明亮，语气轻快自然"></label>
   <div class="row">
-    <label id="voiceFileLabel" data-reference-panel="upload" role="button" tabindex="0" class="btn file"><span id="uploadReferenceLabel">上传参考音频</span><input id="voiceFile" type="file" accept="audio/*"></label>
+    <label id="voiceFileLabel" data-reference-panel="upload" role="button" tabindex="0" class="btn file"><span id="uploadReferenceLabel">上传角色原声</span><input id="voiceFile" type="file" accept="audio/*,video/*,.mkv,.avi,.m4v,.ts,.mts,.m2ts,.opus,.aiff,.aif,.wma,.amr,.mka"></label>
     <button id="recordVoice" data-reference-panel="record" hidden class="btn">开始录音</button>
     <button id="stopRecording" class="btn danger" hidden>停止并使用录音</button>
     <button id="cancelRecording" class="btn ghost" hidden>取消录音</button>
@@ -307,16 +307,17 @@
   <div class="row" data-reference-panel="record" hidden><label class="field mic-choice">麦克风<select id="microphone"><option value="">系统默认麦克风</option></select></label><button id="refreshMicrophones" class="btn ghost sm">刷新麦克风</button></div>
   <canvas id="liveWave" height="70" aria-label="实时录音波形" hidden></canvas>
   <section id="referenceEditor" class="reference-editor" hidden>
-    <div class="row"><h3>参考音频编辑</h3><span id="referenceName" class="muted small"></span><span id="cropState" class="pill">选区直接用于克隆</span></div>
-    <div id="referenceWaveArea" class="wave-area" aria-label="音频波形选区"><canvas id="referenceWave" height="140" aria-label="参考音频波形"></canvas><div id="referencePlayhead" class="wave-playhead" hidden></div><div id="referenceSelection" class="wave-selection"><span id="trimStartHandle" class="wave-handle start" role="slider" tabindex="0" aria-label="裁剪开始手柄"></span><span id="trimEndHandle" class="wave-handle end" role="slider" tabindex="0" aria-label="裁剪结束手柄"></span></div></div>
+    <div class="row"><h3>角色原声</h3><span id="referenceName" class="muted small"></span></div>
+    <div id="referenceWaveArea" class="wave-area" aria-label="音频波形选区"><canvas id="referenceWave" height="140" aria-label="角色原声波形"></canvas><div id="referencePlayhead" class="wave-playhead" hidden></div><div id="referenceSelection" class="wave-selection"><span id="trimStartHandle" class="wave-handle start" role="slider" tabindex="0" aria-label="裁剪开始手柄"></span><span id="trimEndHandle" class="wave-handle end" role="slider" tabindex="0" aria-label="裁剪结束手柄"></span></div></div>
     <div id="referenceRuler" class="wave-ruler"></div>
     <div class="row crop-controls"><label class="field">开始（秒）<input id="trimStart" type="number" min="0" step="0.01" value="0"></label><label class="field">结束（秒）<input id="trimEnd" type="number" min="0" step="0.01"></label><span id="trimDuration" class="muted small"></span><button id="previewSelection" class="btn">试听选区</button><button id="stopSelection" class="btn ghost" disabled>停止试听</button><button id="resetSelection" class="btn ghost">选择全段</button></div>
     <div class="row"><output id="referencePosition" class="playback-position">0.00 / 0.00 秒</output><button id="downloadReference" class="btn ghost sm" type="button">下载选区 WAV</button></div>
-    <p class="hint">拖动两端手柄裁剪，拖动选区整体平移；点击空白波形可拖出新选区。点击“克隆为 PT 音色”直接使用当前选区，无需额外确认。参考台词须对应选区内容；不裁剪则使用全段。</p>
+    <p class="hint">点击波形播放 · 拖动手柄裁剪</p>
   </section>
-  <label class="field">参考台词（可选）<textarea id="voiceText" rows="2" placeholder="填写当前选区实际说出的文字；留空也可以克隆"></textarea></label>
+  <label class="field">对应台词<textarea id="voiceText" rows="2" required placeholder="填写角色原声中选定片段的完整台词"></textarea></label>
   <audio id="voicePreview" controls hidden></audio>
-  <p id="referenceState" class="ref-state">尚未提供参考音频。</p>
+  <details class="voice-section preview-history" id="factoryHistorySection"><summary>试听记录</summary><div id="factoryHistory" class="preview-history-list"></div></details>
+  <p id="referenceState" class="ref-state" hidden></p>
   </div>
   <div class="dialog-foot">
     <label class="check"><input id="voiceOverwrite" type="checkbox">替换同名音色</label>
@@ -333,8 +334,9 @@
   <div class="dialog-body library-body">
     <div class="row library-toolbar">
       <span class="library-toolbar-title">角色 / 情绪</span>
+      <button id="openVoiceHistory" type="button" class="btn ghost sm">全部试听</button>
       <button id="refreshVoiceLibrary" type="button" class="btn ghost sm">刷新</button>
-      <details id="libraryNewMenu" class="action-menu"><summary class="btn primary">＋ 新建音色</summary><div class="action-menu-items"><button id="libraryCreate" type="button">录音 / 描述克隆<span>从参考音频创建新声音</span></button><button id="newVoiceAsset" type="button">导入 PT 文件<span>添加已有的音色资产</span></button></div></details>
+      <details id="libraryNewMenu" class="action-menu"><summary class="btn primary">＋ 新建音色</summary><div class="action-menu-items"><button id="libraryCreate" type="button">录音 / 描述克隆<span>从角色原声创建新声音</span></button><button id="newVoiceAsset" type="button">导入 PT 文件<span>添加已有的音色资产</span></button></div></details>
     </div>
     <p id="voiceSource" class="library-source" role="status"></p>
     <div id="remoteDeletionState" class="ref-state" hidden></div>
@@ -343,7 +345,7 @@
       <aside class="library-sidebar"><input id="voiceSearch" placeholder="搜索角色、情绪、备注" aria-label="搜索音色"><div id="voiceAssets" class="asset-list"></div></aside>
       <div class="voice-detail">
         <div class="voice-detail-head"><div><p id="voiceDetailSubtitle" class="eyebrow">音色详情</p><h3 id="voiceDetailTitle">导入音色</h3></div>
-          <div class="row"><button id="addRoleEmotion" class="btn primary sm" type="button" hidden>＋ 添加情绪</button><details id="voiceMoreMenu" class="action-menu" hidden><summary class="btn ghost sm">更多操作 ···</summary><div class="action-menu-items"><a id="downloadPT" download>下载 PT 文件</a><button id="editBaseAudio" type="button">编辑参考音频 / 重新克隆</button></div></details></div>
+          <div class="row"><button id="addRoleEmotion" class="btn primary sm" type="button" hidden>＋ 添加情绪</button><details id="voiceMoreMenu" class="action-menu" hidden><summary class="btn ghost sm">更多操作 ···</summary><div class="action-menu-items"><a id="downloadPT" download>下载 PT 文件</a><button id="editBaseAudio" type="button">编辑角色原声 / 重新克隆</button></div></details></div>
         </div>
         <section id="assetExisting" class="audition-card" hidden>
           <div class="row"><h4>声音试听</h4><span class="muted small">听一听，再决定</span></div>
@@ -352,11 +354,12 @@
           <div id="assetPreviewProgress" class="progress indeterminate" hidden><i></i></div>
           <audio id="assetPreview" controls preload="metadata" hidden></audio>
         </section>
+        <details class="voice-section preview-history"><summary>试听记录</summary><div id="assetHistory" class="preview-history-list"></div></details>
         <p id="assetUsage" class="hint"></p>
         <details id="voiceMetadata" class="voice-section"><summary><span id="voiceMetadataTitle">编辑音色信息</span><span class="muted small">角色 · 情绪 · 备注</span></summary>
           <form id="voiceEditForm">
             <div class="grid-2"><label class="field">角色<input id="assetRole" list="voiceRoleOptions" required></label><label class="field">情绪<input id="assetEmotion" list="voiceEmotionOptions" value="平静" required></label></div>
-            <label class="field">参考台词<textarea id="assetRefText" rows="2" placeholder="参考录音实际说出的内容（仅作记录）"></textarea></label>
+            <label class="field">对应台词<textarea id="assetRefText" rows="2" placeholder="角色原声实际说出的完整内容"></textarea></label>
             <label class="field">备注<textarea id="assetNotes" rows="2" placeholder="声音特点、适用场景…"></textarea></label>
             <div class="row"><button class="btn primary" type="submit" id="saveVoiceAsset">保存修改</button><label id="ptUploadControl" role="button" tabindex="0" class="btn file"><span id="ptUploadLabel">导入 PT 文件</span><input id="ptFile" type="file" accept=".pt"></label></div>
             <p id="ptUploadState" class="hint" role="status"></p>
@@ -367,6 +370,10 @@
       </div>
     </div>
   </div>
+</dialog>
+<dialog id="voiceHistoryDialog" class="dialog wide" aria-labelledby="voiceHistoryTitle">
+  <div class="dialog-head"><h2 id="voiceHistoryTitle">试听记录</h2><button id="closeVoiceHistory" class="icon-btn" aria-label="关闭试听记录">×</button></div>
+  <div class="dialog-body"><input id="voiceHistorySearch" type="search" aria-label="搜索试听记录" placeholder="搜索角色、情绪或台词"><div id="allVoiceHistory" class="preview-history-list"></div></div>
 </dialog>
 <datalist id="voiceRoleOptions"></datalist>
 <datalist id="voiceEmotionOptions"><option value="平静"><option value="严肃"><option value="兴奋"><option value="愤怒"><option value="低落"><option value="调侃"><option value="追问"><option value="反讽"></datalist>
@@ -435,8 +442,8 @@
   <div id="terminalBody" hidden><pre id="terminalOutput" aria-live="polite"></pre></div>
 </section>
 
-<script src="/reference-editor.js?v=20261014-ui"></script>
+<script src="/reference-editor.js?v=20261014-source"></script>
 <script src="/dialogue-timing.js?v=20261014"></script>
-<script src="/app.js?v=20261014-ui"></script>
+<script src="/app.js?v=20261014-source"></script>
 </body>
 </html>

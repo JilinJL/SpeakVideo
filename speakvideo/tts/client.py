@@ -244,6 +244,9 @@ class TTSClient:
     def create_pt(
         self, *, reference: Path, role: str, emotion: str, ref_text: str, overwrite: bool = False
     ) -> dict:
+        ref_text = ref_text.strip()
+        if not ref_text:
+            raise ValueError("请填写角色原声的对应台词")
         payload = dict(role=role, emotion=emotion, ref_text=ref_text, overwrite=overwrite)
         if self.mode == "gateway":
             import json

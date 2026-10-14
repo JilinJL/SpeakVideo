@@ -2,11 +2,11 @@
 
 // Selections are immediately usable. Prepare exact PCM only when cloning/downloading.
 class ReferenceEditor {
-  constructor({request, onChange, onError}) {
-    this.request = request; this.onChange = onChange; this.onError = onError;
+  constructor({request, onChange, onError, onPlay = () => {}}) {
+    this.request = request; this.onChange = onChange; this.onError = onError; this.onPlay = onPlay;
     this.el = id => document.getElementById(id);
     this.version = 0; this.buffer = null; this.source = null; this.locked = false;
-    this.ctx = null; this.pending = false;
+    this.ctx = null; this.pending = false; this.playVersion = 0;
     this.el('trimStart').oninput = () => this.setSelection(Number(this.el('trimStart').value), this.end);
     this.el('trimEnd').oninput = () => this.setSelection(this.start, Number(this.el('trimEnd').value));
     this.el('resetSelection').onclick = () => this.setSelection(0, this.buffer.duration);
@@ -16,7 +16,8 @@ class ReferenceEditor {
     const area = this.el('referenceWaveArea');
     area.onpointerdown = event => this.beginDrag(event);
     area.onpointermove = event => this.drag(event);
-    area.onpointerup = area.onpointercancel = () => this.dragging = null;
+    area.onpointerup = () => this.finishDrag();
+    area.onpointercancel = () => { this.dragging = null; };
     for (const [id, side] of [['trimStartHandle', 'start'], ['trimEndHandle', 'end']]) {
       this.el(id).onkeydown = event => {
         if (this.locked || this.pending || !this.buffer) return;
@@ -37,10 +38,10 @@ class ReferenceEditor {
     this.stop(); this.buffer = null; this.ready = null; this.el('referenceEditor').hidden = true; this.onChange(null); this.pending = true; this.render();
     try {
       const response = await fetch(result.preview_url);
-      if (!response.ok) throw Error('参考音频无法读取，请重新上传');
+      if (!response.ok) throw Error('角色原声无法读取，请重新上传');
       const buffer = await this.context().decodeAudioData(await response.arrayBuffer());
       if (version !== this.version) return;
-      if (buffer.duration < .1) throw Error('参考音频至少需要 0.1 秒');
+      if (buffer.duration < .1) throw Error('角色原声至少需要 0.1 秒');
       this.buffer = buffer; this.original = result; this.start = 0; this.end = buffer.duration;
       this.locked = false; this.el('referenceName').textContent = `${name} · ${buffer.duration.toFixed(2)} 秒`;
       this.el('referenceEditor').hidden = false;
@@ -60,7 +61,7 @@ class ReferenceEditor {
   }
   beginDrag(event) {
     if (!this.buffer || this.locked || this.pending) return;
-    event.preventDefault(); this.stop();
+    event.preventDefault();
     const area = this.el('referenceWaveArea');
     const rect = area.getBoundingClientRect();
     const time = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) * this.buffer.duration;
@@ -68,15 +69,17 @@ class ReferenceEditor {
     const side = event.target.id === 'trimStartHandle' || Math.abs(time - this.start) < tolerance ? 'start'
       : event.target.id === 'trimEndHandle' || Math.abs(time - this.end) < tolerance ? 'end'
       : time > this.start && time < this.end ? 'move' : 'new';
-    this.dragging = {side, anchor: time, start: this.start, end: this.end};
+    this.dragging = {side, anchor: time, clientX: event.clientX, start: this.start, end: this.end, moved: false, handle: ['trimStartHandle','trimEndHandle'].includes(event.target.id)};
     area.setPointerCapture(event.pointerId);
-    if (side === 'new') this.setSelection(time, time + .1);
+
   }
   drag(event) {
     if (!this.dragging || this.locked || this.pending) return;
     const rect = this.el('referenceWaveArea').getBoundingClientRect();
     const t = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) * this.buffer.duration;
     const d = this.dragging;
+    if (!d.moved && Math.abs(event.clientX - d.clientX) < 4) return;
+    d.moved = true;
     if (d.side === 'start') this.setSelection(Math.min(t, this.end - .1), this.end);
     else if (d.side === 'end') this.setSelection(this.start, t);
     else if (d.side === 'new') this.setSelection(Math.min(t, d.anchor), Math.max(t, d.anchor));
@@ -85,11 +88,14 @@ class ReferenceEditor {
       this.setSelection(d.start + delta, d.end + delta);
     }
   }
+  finishDrag() {
+    const drag = this.dragging; this.dragging = null;
+    if (drag && !drag.moved && !drag.handle) return this.play(drag.anchor, this.buffer.duration).catch(this.onError);
+  }
   isPrepared() { return this.ready && this.readySelection?.[0] === this.start && this.readySelection?.[1] === this.end; }
   render() {
     for (const id of ['trimStart', 'trimEnd', 'resetSelection', 'downloadReference']) this.el(id).disabled = this.pending || this.locked || !this.buffer;
     this.el('previewSelection').disabled = this.pending || this.locked || !this.buffer;
-    this.el('cropState').textContent = this.pending ? '处理中…' : '选区直接用于克隆';
     if (!this.buffer) return;
     if (!this.source) this.position(this.start);
     this.el('trimStart').value = this.start.toFixed(2); this.el('trimEnd').value = this.end.toFixed(2);
@@ -130,26 +136,28 @@ class ReferenceEditor {
     this.el('referencePlayhead').style.left = `${duration ? Math.min(100, time / duration * 100) : 0}%`;
   }
   stop(reset = true) {
-    cancelAnimationFrame(this.animation);
+    ++this.playVersion; cancelAnimationFrame(this.animation);
     if (this.source) { this.source.onended = null; try { this.source.stop(); } catch {} this.source.disconnect(); this.source = null; }
     this.el('stopSelection').disabled = true; this.el('previewSelection').textContent = '试听选区';
     if (reset) this.position(this.start || 0);
   }
-  async play() {
-    if (!this.buffer || this.pending) return;
-    this.stop(); const version = this.version, ctx = this.context();
+  async play(offset = this.start, limit = this.end) {
+    if (!this.buffer || this.pending || this.locked) return;
+    this.stop(); this.onPlay(); const version = this.version, playback = ++this.playVersion, ctx = this.context();
+    const start = Math.max(0, Math.min(offset, this.buffer.duration)), end = Math.min(limit, this.buffer.duration);
+    if (end <= start) { this.position(start); return; }
     await ctx.resume();
-    if (version !== this.version || !this.el('factoryDialog').open) return;
+    if (version !== this.version || playback !== this.playVersion || !this.el('factoryDialog').open) return;
     this.source = ctx.createBufferSource(); this.source.buffer = this.buffer;
     this.source.connect(ctx.destination);
-    this.source.onended = () => { this.stop(false); this.position(this.end); };
-    const started = ctx.currentTime, start = this.start, end = this.end;
+    this.source.onended = () => { this.stop(false); this.position(end); };
+    const started = ctx.currentTime;
     this.source.start(0, start, end - start);
     const tick = () => { this.position(Math.min(end, start + ctx.currentTime - started)); if (this.source) this.animation = requestAnimationFrame(tick); };
     tick(); this.el('stopSelection').disabled = false; this.el('previewSelection').textContent = '重新试听选区';
   }
   async prepare() {
-    if (!this.buffer || this.pending) throw Error('请等待参考音频处理完成');
+    if (!this.buffer || this.pending) throw Error('请等待角色原声处理完成');
     if (this.isPrepared()) return this.ready;
     this.stop(); this.pending = true; this.render(); const version = this.version, selection = [this.start, this.end];
     try {
@@ -157,7 +165,7 @@ class ReferenceEditor {
         reference_id: this.original.reference_id, start: selection[0],
         end: Math.min(selection[1], this.original.duration_precise || this.buffer.duration),
       });
-      if (version !== this.version) throw Error('参考音频已切换，请重新提交');
+      if (version !== this.version) throw Error('角色原声已切换，请重新提交');
       this.ready = result; this.readySelection = selection; this.onChange(result);
       return result;
     } finally { if (version === this.version) { this.pending = false; this.render(); } }

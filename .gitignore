@@ -21,3 +21,5 @@ dist/
 runtime/
 logs/
 gateway/speakvideo-gateway
+
+voice-previews/

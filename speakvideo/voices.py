@@ -322,6 +322,9 @@ class VoiceStore:
         ref_text: str,
         overwrite: bool = False,
     ):
+        ref_text = ref_text.strip()
+        if not ref_text:
+            raise ValueError("请填写角色原声的对应台词")
         dst = self.path(role, emotion)
         if dst.exists() and not overwrite:
             raise ValueError("当前音色库已存在同名音色；覆盖需要显式 overwrite")
