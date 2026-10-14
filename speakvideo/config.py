@@ -49,8 +49,11 @@ class LLMEndpoint(Strict):
     api_keys: list[SecretStr] = Field(default_factory=list)
     enabled: bool = True
     json_mode: bool = True
+    # Streaming keeps long generations alive; timeout is the longest silence between chunks.
+    stream: bool = True
     timeout_seconds: float = Field(default=180, gt=0, le=3600)
-    max_tokens: int = Field(default=8192, ge=32, le=131072)
+    # None omits max_tokens so the provider's own output limit applies.
+    max_tokens: int | None = Field(default=None, ge=32, le=2_000_000)
 
     @model_validator(mode="after")
     def valid_url(self):
@@ -172,6 +175,10 @@ def load_settings(root: Path | None = None) -> Settings:
         import json
 
         data["llm"] = json.loads(llm_path.read_text())
+        for provider in data["llm"].get("providers", []):
+            # Files written before streaming existed stored the old 8192 default explicitly.
+            if "stream" not in provider and provider.get("max_tokens") == 8192:
+                provider.pop("max_tokens")
     for section, mapping in {
         "tts": {
             "MODE": "mode",

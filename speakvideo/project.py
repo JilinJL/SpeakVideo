@@ -98,7 +98,7 @@ class Project:
                 "master": sha256(self.root / "exports" / metadata["files"]["master.wav"]["path"]),
             }
         elif gate == "video":
-            from .video import video_signature
+            from .video import video_config, video_signature
 
             metadata = read_json(self.root / "exports/video.json")
             data = {
@@ -108,6 +108,15 @@ class Project:
                 "settings": read_json(self.root / "video.json", {}),
                 "video": sha256(self.root / "exports" / metadata["files"]["final.mp4"]["path"]),
             }
+            if video_config(self)["cover"]["options"]["enabled"]:
+                cover = read_json(self.root / "exports/cover.json", {})
+                data["cover"] = {
+                    "signature": cover.get("signature"),
+                    "files": {
+                        name: sha256(self.root / "exports" / f["path"])
+                        for name, f in cover.get("files", {}).items()
+                    },
+                }
         else:
             raise ValueError("未知确认阶段")
         return hashlib.sha256(
@@ -137,10 +146,12 @@ class Project:
             if not audio_current(self):
                 raise ValueError("音频已过期、缺失或损坏，请先重新合并混音")
         if gate == "video":
-            from .video import video_current
+            from .video import cover_current, video_config, video_current
 
             if not video_current(self):
                 raise ValueError("成片已过期、缺失或损坏，请先重新合成视频")
+            if video_config(self)["cover"]["options"]["enabled"] and not cover_current(self):
+                raise ValueError("封面已过期、缺失或损坏，请先重新导出封面")
             if not all(self.approved(g) for g in ("script", "binding", "audio")):
                 raise ValueError("请先完成剧本、音色绑定与完整音频确认")
         state = read_json(self.root / "workflow.json", {"approvals": {}})

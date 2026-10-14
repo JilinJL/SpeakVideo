@@ -12,7 +12,7 @@ from pathlib import Path
 from .audio import audio_current
 from .project import Project
 from .storage import lock, read_json, sha256, write_json
-from .video import video_current
+from .video import cover_current, video_config, video_current
 
 
 def delivery_current(project: Project) -> bool:
@@ -24,6 +24,7 @@ def delivery_current(project: Project) -> bool:
             and all(project.approved(g) for g in ("script", "binding", "audio", "video"))
             and audio_current(project)
             and video_current(project)
+            and (not video_config(project)["cover"]["options"]["enabled"] or cover_current(project))
             and meta["review"] == project.digest("video")
             and sha256(path) == meta["files"]["delivery.zip"]["sha256"]
         )
@@ -37,6 +38,9 @@ def build_delivery(project: Project, cancelled=lambda: False, progress=lambda **
             raise ValueError("请先确认剧本、音色绑定、完整音频与成片")
         if not audio_current(project) or not video_current(project):
             raise ValueError("音视频交付已过期或损坏，请重新生成并确认")
+        with_cover = video_config(project)["cover"]["options"]["enabled"]
+        if with_cover and not cover_current(project):
+            raise ValueError("封面设置已变化，请先重新导出封面并确认成片")
         if delivery_current(project):
             return read_json(project.root / "exports/delivery.json")
         progress(stage="正在校验并打包成片、音频、字幕与工程快照", kind="stage")
@@ -49,7 +53,7 @@ def build_delivery(project: Project, cancelled=lambda: False, progress=lambda **
         checksums = {}
         try:
             with zipfile.ZipFile(temporary, "w", zipfile.ZIP_STORED) as bundle:
-                for kind in ("audio", "video"):
+                for kind in ("audio", "video", "cover") if with_cover else ("audio", "video"):
                     metadata = read_json(project.root / f"exports/{kind}.json")
                     for name, record in metadata["files"].items():
                         if cancelled():
@@ -79,7 +83,8 @@ def build_delivery(project: Project, cancelled=lambda: False, progress=lambda **
                     "SpeakVideo 交付包\n"
                     f"工程：{project.name}\n话题：{project.script().meta.topic}\n"
                     "video/final.mp4：已确认的成片\naudio/：WAV、MP3、字幕、时间线及生成快照\n"
-                    "project/：剧本、绑定及成片设置\nSHA256.json：文件校验清单\n"
+                    + ("cover/：定制封面 PNG、JPG\n" if with_cover else "")
+                    + "project/：剧本、绑定及成片设置\nSHA256.json：文件校验清单\n"
                     "本包用于本地交付和手动上传，未自动发布到任何平台。\n",
                 )
             if cancelled():

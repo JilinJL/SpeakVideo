@@ -20,7 +20,7 @@
 <link rel="icon" href="/brand/logo-small.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
 <link rel="manifest" href="/manifest.json">
-<link rel="stylesheet" href="/style.css?v=20261014-source">
+<link rel="stylesheet" href="/style.css?v=20261014-video-design">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -28,6 +28,7 @@
     <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 3v18"/></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h16m-6-6 6 6-6 6"/></symbol>
     <symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
     <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7Z"/></symbol>
     <symbol id="i-voice" viewBox="0 0 24 24"><path d="M2 10v3M6 6v11M10 3v18M14 8v7M18 5v13M22 10v3"/></symbol>
@@ -40,6 +41,7 @@
     <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></symbol>
     <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4"/></symbol>
     <symbol id="i-message" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5"/></symbol>
     <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></symbol>
   </defs>
 </svg>
@@ -154,17 +156,28 @@
           <button type="button" class="btn ghost sm" data-open-prompt="brief">编辑提示词</button>
         </div>
         <div class="card brief-card">
-          <div class="card-head"><h2>对话草稿</h2><button data-action="brief" class="btn ghost sm">写对话草稿</button></div>
-          <div class="card-scroll">
-          <label class="field">话题<input id="topic"></label>
-          <label class="field">关键词<input id="keywords" placeholder="逗号分隔"></label>
-          <label class="field">本次要求<textarea id="guidance" rows="3" placeholder="例如：敢问一些不方便问的问题；回答用生活例子讲透，不用急着下结论。"></textarea></label>
-          <div id="personas" class="personas"></div>
-          <div class="field grow"><div class="field-head"><label for="brief">草稿（可选）</label><button type="button" data-action="extend" class="btn ghost sm" title="保留原草稿，补充例子与解释，并形成明确结论和收尾">扩展对话</button></div><textarea id="brief" rows="10" placeholder="p1：我想直接问……&#10;p2：这得看具体情况。比如……&#10;p1：那你的意思是……？&#10;&#10;可以先写草稿再整理，也可以留空，直接按话题生成台词。"></textarea></div>
-          </div>
-          <div class="card-foot">
-            <button data-action="generate" class="btn">生成台词</button>
-            <p class="hint">有草稿按草稿整理，留空按话题写。重新生成会替换全部台词，旧版自动保留。</p>
+          <div class="card-head"><h2>对话创作</h2><span class="muted small">草稿 → 台词</span></div>
+          <div class="card-scroll draft-timeline" aria-label="对话创作时间线">
+            <details id="draftSettings" class="draft-step draft-settings" open>
+              <summary class="draft-step-head"><span class="draft-step-number" aria-hidden="true">01</span><span class="draft-step-title"><strong>对话草稿</strong><small>话题 · 关键词 · 本次要求 · 人设</small></span><span class="draft-settings-toggle">编辑设定<svg class="ico" aria-hidden="true"><use href="#i-chevron"/></svg></span></summary>
+              <div class="draft-step-body">
+                <label class="field">话题<input id="topic" placeholder="这次想聊什么？"></label>
+                <label class="field">关键词<input id="keywords" placeholder="逗号分隔"></label>
+                <label class="field">本次要求<textarea id="guidance" rows="3" placeholder="例如：用生活例子讲透，最后给出明确结论。"></textarea></label>
+                <div id="personas" class="personas"></div>
+                <button type="button" data-action="brief" class="btn primary draft-next">生成草稿<svg class="ico" aria-hidden="true"><use href="#i-arrow"/></svg></button>
+              </div>
+            </details>
+            <section id="draftToLines" class="draft-step draft-to-lines" aria-labelledby="draftToLinesTitle">
+              <div class="draft-step-head"><span class="draft-step-number" aria-hidden="true">02</span><div class="draft-step-title"><h3 id="draftToLinesTitle">台词</h3><small id="draftStepState">等待草稿</small></div></div>
+              <div class="draft-step-body">
+                <div class="draft-editor-head"><label for="brief">对话草稿 <span class="muted small">可编辑</span></label><button type="button" data-action="extend" class="btn ghost sm" title="保留原草稿，补充例子与解释，并形成明确结论和收尾">扩展对话</button></div>
+                <textarea id="brief" rows="12" placeholder="先在上一步生成草稿，再在这里修改对话、例子和结论。也可以直接粘贴已有草稿。"></textarea>
+                <div class="draft-live-controls"><span id="briefLive" class="live-state" hidden></span><button type="button" class="btn ghost sm" data-discard-llm="brief" hidden title="停止并丢弃本次输出，恢复生成前的内容">放弃</button><button type="button" class="btn danger sm" data-stop-llm="brief" hidden title="停止并保留已生成的部分"><svg class="ico" aria-hidden="true"><use href="#i-stop"/></svg>停止并保留</button></div>
+                <button type="button" data-action="generate" class="btn primary draft-next" disabled>生成台词<svg class="ico" aria-hidden="true"><use href="#i-arrow"/></svg></button>
+                <p id="draftGenerateHint" class="hint">先生成或填写草稿，再生成台词。</p>
+              </div>
+            </section>
           </div>
         </div>
 
@@ -174,6 +187,7 @@
             <div class="row">
               <button id="addLine" class="btn ghost sm"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg>添加台词</button>
               <button data-approve="script" class="btn primary sm">定稿，去绑定音色</button>
+              <button type="button" class="btn ghost sm" data-discard-llm="generate" hidden title="停止并丢弃本次输出，恢复生成前的内容">放弃</button><button type="button" class="btn danger sm" data-stop-llm="generate" hidden title="停止并保留已生成的部分"><svg class="ico" aria-hidden="true"><use href="#i-stop"/></svg>停止并保留</button>
             </div>
           </div>
           <div id="lines" class="lines"></div>
@@ -247,6 +261,51 @@
             <p class="hint">使用当前完整音频（含已保存的 BGM），字幕跟随台词时间线。不同尺寸居中裁切填满，导出 H.264 + AAC 的 MP4。</p>
           </div>
           <div class="card-foot row"><button id="saveVideo" class="btn">保存视频设置</button><button data-action="render" class="btn primary">合成并导出视频</button></div>
+        </div>
+        <div class="card video-design-card">
+          <div class="card-head"><h2>画面定制</h2><div class="row design-tabs"><button id="editOverlayTab" class="btn ghost sm" aria-pressed="true">视频贴图</button><button id="editCoverTab" class="btn ghost sm" aria-pressed="false">封面预览</button></div></div>
+          <p id="designHint" class="hint">上传角色透明 PNG，在画面里拖动位置，拖动右下角调整大小。字幕合成时会叠在最上层。</p>
+          <div class="design-time"><label>预览时间（秒）<input id="designSecond" type="number" min="0" step="0.01" value="0"></label><button id="playDesignAudio" class="btn sm" disabled>播放发言预览</button><span id="designPreviewState" class="muted small" role="status"></span></div>
+          <audio id="designAudio" preload="metadata" hidden></audio>
+          <div id="designStage" class="design-stage" aria-label="视频贴图布局预览">
+            <img id="designBackgroundImage" alt="背景素材" hidden>
+            <video id="designBackgroundVideo" muted playsinline preload="auto" hidden></video>
+            <div id="designLayers"></div>
+            <div id="designSubtitleGuide" class="design-subtitle-guide">字幕区域 · 合成时显示真实台词</div>
+            <img id="coverDesignPreview" alt="定制封面预览" hidden>
+          </div>
+          <div class="mix-row"><label class="btn file">添加贴图<input id="overlayFiles" type="file" multiple accept=".png,.webp,.jpg,.jpeg"></label><span class="muted small">透明 PNG / WebP · 最多 12 张</span></div>
+          <div id="overlayList" class="overlay-list"></div>
+          <fieldset id="overlayControls" class="overlay-controls" hidden>
+            <legend id="overlaySelectedName">贴图设置</legend>
+            <label class="field">绑定说话角色<select id="overlaySpeaker"><option value="">不绑定 · 普通贴图</option><option value="p1">角色 1 · 蓝色高光</option><option value="p2">角色 2 · 橙色高光</option></select></label>
+            <label class="check"><input id="overlaySpeakingGlow" type="checkbox" checked>该角色发言时自动泛光</label>
+            <label class="field">高光强度 <output id="overlayGlowOut"></output><input id="overlayGlowStrength" type="range" min="0" max="100" step="1" value="85"></label>
+            <p class="hint">高光沿用角色字幕颜色，停顿时熄灭。默认全程显示；可用下方时间设置限制贴图出现的区间。</p>
+            <div class="grid-2"><label class="field">水平位置（%）<input id="overlayX" type="number" min="0" max="100" step="0.1"></label><label class="field">垂直位置（%）<input id="overlayY" type="number" min="0" max="100" step="0.1"></label></div>
+            <label class="field">宽度 <output id="overlayWidthOut"></output><input id="overlayWidth" type="range" min="2" max="100" step="0.1"></label>
+            <label class="field">不透明度 <output id="overlayOpacityOut"></output><input id="overlayOpacity" type="range" min="0" max="100" step="1"></label>
+            <div class="grid-2"><label class="field">开始（秒）<input id="overlayStart" type="number" min="0" step="0.1"></label><label class="field">结束（秒，留空到片尾）<input id="overlayEnd" type="number" min="0" step="0.1" placeholder="片尾"></label></div>
+            <div class="row"><button id="overlayFullTime" class="btn ghost sm">全程显示</button><label class="check"><input id="overlayFlip" type="checkbox">水平翻转</label><button id="overlayBackward" class="btn ghost sm">下移一层</button><button id="overlayForward" class="btn ghost sm">上移一层</button><button id="removeOverlay" class="btn ghost sm">移除贴图</button></div>
+          </fieldset>
+        </div>
+        <div class="card video-cover-card">
+          <div class="card-head"><h2>定制封面</h2><span id="coverState" class="muted small"></span></div>
+          <div class="card-scroll">
+            <label class="check"><input id="coverEnabled" type="checkbox">合成视频时一并导出封面，放入交付包</label>
+            <label class="field">封面底图<select id="coverBackground"><option value="frame">使用背景视频 / 图片的指定画面</option><option value="image">使用上传的封面底图</option></select></label>
+            <div class="row"><label class="btn file">上传封面底图<input id="coverFile" type="file" accept=".png,.jpg,.jpeg,.webp"></label><span id="coverImageName" class="muted small"></span></div>
+            <label class="field">取画面时间（秒）<input id="coverSecond" type="number" min="0" step="0.1" value="0"></label>
+            <label class="field">主标题<textarea id="coverTitle" rows="2" maxlength="120" placeholder="写一个让人想点开的标题"></textarea></label>
+            <label class="field">副标题<input id="coverSubtitle" maxlength="200" placeholder="补充一句，或留空"></label>
+            <div class="grid-2"><label class="field">标题字号<input id="coverFontSize" type="number" min="24" max="160" value="88"></label><label class="field">文字颜色<input id="coverColor" type="color" value="#ffffff"></label></div>
+            <label class="field">标题距顶部 <output id="coverYOut"></output><input id="coverY" type="range" min="0" max="85" step="1" value="12"></label>
+            <label class="field">底图压暗 <output id="coverShadeOut"></output><input id="coverShade" type="range" min="0" max="85" step="1" value="25"></label>
+            <label class="check"><input id="coverShowOverlays" type="checkbox" checked>封面保留该时刻的角色贴图</label>
+            <p class="hint">封面导出为独立 PNG 和 JPG，不增加视频片头时长。改封面后可以只导出封面。</p>
+          </div>
+          <div class="card-foot row"><button id="previewCover" class="btn">预览封面</button><button data-action="cover" class="btn primary">导出封面</button></div>
+          <div id="coverExports" class="exports cover-exports"></div>
         </div>
         <div class="card video-preview-card">
           <div class="card-head"><h2>成片预览</h2><span id="videoState" class="muted small"></span></div>
@@ -444,6 +503,7 @@
 
 <script src="/reference-editor.js?v=20261014-source"></script>
 <script src="/dialogue-timing.js?v=20261014"></script>
-<script src="/app.js?v=20261014-source"></script>
+<script src="/video-design.js?v=20261014-speaking-glow"></script>
+<script src="/app.js?v=20261014-speaking-glow"></script>
 </body>
 </html>

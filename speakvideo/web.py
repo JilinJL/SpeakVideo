@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
 import threading
 import time
 import uuid
@@ -10,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from starlette.concurrency import run_in_threadpool
@@ -24,20 +26,27 @@ from .jobs import report, synthesize
 from .llm_config import public_llm, save_llm
 from .processing import ffmpeg
 from .project import Project
-from .script.engine import OpenAICompatibleProvider
+from .script.engine import LLMCancelled, LLMHooks, OpenAICompatibleProvider
 from .script.moods import MOOD_LABELS
 from .script.prompts import default_prompts, structure_contract
 from .script.schema import Script, VoiceBinding, validate_ids
+from .script.stream import partial_lines
 from .storage import atomic_bytes, lock, read_json, write_json
 from .tts.client import TTSClient, TTSError, wav_info
 from .tts.grouping import speech_groups
 from .video import (
     SUBTITLE_COLORS,
+    OverlayEdit,
     VideoEdit,
+    cover_current,
+    cover_picture,
+    edit_config,
+    render_cover,
     render_video,
     validate_asset,
     video_config,
     video_current,
+    video_timeline,
 )
 from .voice_previews import VoicePreviews
 from .voices import VoiceStore
@@ -106,6 +115,9 @@ class TTSModeEdit(BaseModel):
     local_url: str = "http://127.0.0.1:8001"
 
 
+LLM_LABELS = {"brief", "extend", "generate", "llm_test"}
+
+
 def create_app(settings: Settings) -> FastAPI:
     settings.ensure_dirs()
     app = FastAPI(title="SpeakVideo", version="0.1.0")
@@ -114,6 +126,10 @@ def create_app(settings: Settings) -> FastAPI:
     )
     tasks: dict[str, dict] = {}
     events: dict[str, threading.Event] = {}
+    # Live LLM output per task (memory only) and the hook that closes its open stream.
+    streams: dict[str, dict] = {}
+    aborts: dict[str, object] = {}
+    llm_runs = settings.paths.cache / "llm-runs"
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="speakvideo")
     remote_inventory_cache = {"at": 0.0, "assets": [], "status": {}}
     capabilities_cache = {"at": 0.0, "value": {}}
@@ -192,6 +208,93 @@ def create_app(settings: Settings) -> FastAPI:
             raise HTTPException(404, "工程不存在")
         return p
 
+    def task_log(item: dict, message: str):
+        entry = {"at": time.time(), "message": message}
+        item["log"] = [*item.get("log", []), entry][-80:]
+        write_json(settings.paths.cache / f"task-{item['id']}.json", item)
+
+    def llm_hooks(item: dict, kind: str) -> LLMHooks:
+        """Wire one model call to the task: live text, log lines, stop and raw output."""
+        key = item["id"]
+        previous = streams.get(key, {})
+        live = streams[key] = {
+            "kind": kind,
+            "phase": previous.get("phase", 0) + 1,
+            "text": "",
+            "lines": [],
+            "reasoning": 0,
+            "version": previous.get("version", 0) + 1,
+        }
+
+        def on_text(text: str, reasoning: int):
+            live.update(text=text, reasoning=reasoning, version=live["version"] + 1)
+            if kind == "generate":
+                live["lines"] = partial_lines(text)
+            # Memory only: the task list shows live counts without rewriting the task file.
+            item.setdefault("progress", {})["stage"] = (
+                f"正在生成台词 · 已输出 {len(live['lines'])} 行"
+                if kind == "generate" and text
+                else f"正在{'续写' if kind == 'extend' else '撰写'}草稿 · 已输出 {len(text):,} 字"
+                if kind in {"brief", "extend"} and text
+                else f"模型思考中 · 已推理 {reasoning:,} 字"
+                if reasoning
+                else item.get("progress", {}).get("stage", "等待模型响应")
+            )
+
+        def on_finish(record: dict):
+            atomic_bytes(
+                llm_runs / f"{key}-{live['phase']}.json",
+                (
+                    json.dumps({"task": key, "kind": kind, **record}, ensure_ascii=False, indent=2)
+                ).encode(),
+            )
+            summary = {
+                k: record.get(k)
+                for k in (
+                    "endpoint",
+                    "finish_reason",
+                    "usage_text",
+                    "first_output_seconds",
+                    "elapsed_seconds",
+                    "error",
+                    "request_id",
+                )
+            }
+            summary.update(
+                kind=kind,
+                content_chars=len(record.get("content") or ""),
+                reasoning_chars=len(record.get("reasoning") or ""),
+                output_tail=(record.get("content") or "")[-600:],
+                file=f".cache/llm-runs/{key}-{live['phase']}.json",
+            )
+            item["llm"] = summary
+            done = (
+                f"模型结束 · finish_reason={record.get('finish_reason') or '无'}"
+                f" · 正文 {summary['content_chars']:,} 字"
+                + (
+                    f" · 推理 {summary['reasoning_chars']:,} 字"
+                    if summary["reasoning_chars"]
+                    else ""
+                )
+                + (f" · {summary['usage_text']}" if summary["usage_text"] else "")
+                + f" · 用时 {record.get('elapsed_seconds') or 0:.1f} 秒"
+            )
+            task_log(item, done)
+
+        def register(abort):
+            if abort is None:
+                aborts.pop(key, None)
+            else:
+                aborts[key] = abort
+
+        return LLMHooks(
+            on_text=on_text,
+            on_finish=on_finish,
+            log=lambda message: task_log(item, message),
+            cancelled=events[key].is_set,
+            register_abort=register,
+        )
+
     def submit(label: str, fn, project_name: str | None = None, line_id: str | None = None):
         if project_name and any(
             t.get("project") == project_name and t["status"] in {"queued", "running"}
@@ -215,6 +318,9 @@ def create_app(settings: Settings) -> FastAPI:
                 for line in group.lines
             ]
         tasks[key], events[key] = item, threading.Event()
+        for old in [k for k, t in tasks.items() if k in streams and t.get("finished_at")]:
+            if time.time() - tasks[old]["finished_at"] > 60:
+                streams.pop(old, None)
 
         def persist():
             write_json(settings.paths.cache / f"task-{key}.json", item)
@@ -243,7 +349,10 @@ def create_app(settings: Settings) -> FastAPI:
             persist()
             try:
                 result = fn(events[key].is_set)
-                final_status = "paused" if events[key].is_set() else "succeeded"
+                # A model result that was already saved counts as done even if stop came late.
+                final_status = (
+                    "paused" if events[key].is_set() and label not in LLM_LABELS else "succeeded"
+                )
                 item.update(
                     result=(
                         f"已生成视频 · {result['duration']:.1f} 秒"
@@ -268,8 +377,15 @@ def create_app(settings: Settings) -> FastAPI:
                 )
             except Exception as exc:
                 final_status = "paused" if events[key].is_set() else "failed"
-                item["error"] = str(exc)
+                if isinstance(exc, LLMCancelled) or (
+                    final_status == "paused" and label in LLM_LABELS
+                ):
+                    item["error"] = "已停止生成，未保存任何内容"
+                else:
+                    item["error"] = str(exc)
+                    task_log(item, f"失败（{type(exc).__name__}）：{exc}")
             finally:
+                aborts.pop(key, None)
                 if item.get("progress", {}).get("kind") == "lines" and project_name:
                     item["progress"] = line_progress(item)
                 item["finished_at"] = time.time()
@@ -277,6 +393,8 @@ def create_app(settings: Settings) -> FastAPI:
                     item.get("error") or item.get("result") or "已停止"
                 )
                 item["status"] = final_status
+                if key in streams:
+                    streams[key]["version"] += 1
                 persist()
 
         executor.submit(execute)
@@ -396,7 +514,7 @@ def create_app(settings: Settings) -> FastAPI:
             snapshot.failover = False
 
         def execute(cancelled):
-            provider = OpenAICompatibleProvider(snapshot)
+            provider = OpenAICompatibleProvider(snapshot, llm_hooks(task_context.item, "test"))
             answer = provider.complete("你是连接测试助手。", "仅回答：LLM 连接成功。")
             return f"{provider.last_endpoint}：{answer}"
 
@@ -656,6 +774,9 @@ def create_app(settings: Settings) -> FastAPI:
             "video": video_config(p),
             "video_export": read_json(p.root / "exports/video.json", {}),
             "video_current": video_current(p),
+            "video_timeline": video_timeline(p),
+            "cover_export": read_json(p.root / "exports/cover.json", {}),
+            "cover_current": cover_current(p),
             "delivery_export": read_json(p.root / "exports/delivery.json", {}),
             "delivery_current": delivery_current(p),
         }
@@ -697,14 +818,20 @@ def create_app(settings: Settings) -> FastAPI:
     def action(name: str, body: Action):
         p = project(name)
         actions = {
-            "brief": lambda cancel: generate_brief(p),
-            "extend": lambda cancel: extend_brief(p),
-            "generate": lambda cancel: generate_script(p),
+            "brief": lambda cancel: generate_brief(p, llm_hooks(task_context.item, "brief")),
+            "extend": lambda cancel: extend_brief(p, llm_hooks(task_context.item, "extend")),
+            "generate": lambda cancel: generate_script(p, llm_hooks(task_context.item, "generate")),
             "synth": lambda cancel: synthesize(p, cancelled=cancel),
             "retry": lambda cancel: synthesize(p, retry_line=body.line_id, cancelled=cancel),
             "merge": lambda cancel: build_audio(p, cancelled=cancel),
-            "run": lambda cancel: advance(p, cancelled=cancel, progress=task_progress),
+            "run": lambda cancel: advance(
+                p,
+                cancelled=cancel,
+                progress=task_progress,
+                llm=lambda kind: llm_hooks(task_context.item, kind),
+            ),
             "render": lambda cancel: render_video(p, cancelled=cancel, progress=task_progress),
+            "cover": lambda cancel: render_cover(p, cancelled=cancel, progress=task_progress),
             "package": lambda cancel: build_delivery(p, cancelled=cancel, progress=task_progress),
         }
         if body.action not in actions:
@@ -729,16 +856,23 @@ def create_app(settings: Settings) -> FastAPI:
         p = project(name)
         mutable_project(name)
         with lock(p.root / ".project.lock"):
-            config = video_config(p)
-            assets = {asset["id"]: asset for asset in config["assets"]}
-            if len(body.asset_ids) != len(set(body.asset_ids)) or any(
-                key not in assets for key in body.asset_ids
-            ):
-                raise ValueError("素材顺序包含重复或不存在的素材")
-            config["assets"] = [assets[key] for key in body.asset_ids]
-            config["options"] = body.model_dump(exclude={"asset_ids"})
+            config = edit_config(video_config(p), body)
             write_json(p.root / "video.json", config)
         return config
+
+    @app.post("/api/projects/{name}/cover-preview")
+    def preview_cover(name: str, body: VideoEdit):
+        import io
+
+        p = project(name)
+        with lock(p.root / ".project.lock"):
+            config = edit_config(video_config(p), body)
+            image = cover_picture(p, config)
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        return Response(
+            buffer.getvalue(), media_type="image/png", headers={"Cache-Control": "no-store"}
+        )
 
     @app.post("/api/projects/{name}/assets/{kind}")
     async def upload_asset(name: str, kind: str, file: UploadFile = File(...)):
@@ -747,6 +881,8 @@ def create_app(settings: Settings) -> FastAPI:
         suffix = Path(file.filename or "").suffix.lower()
         if kind == "bgm" and suffix not in {".mp3", ".wav", ".m4a", ".flac", ".ogg"}:
             raise ValueError("请选择音频文件")
+        if kind in {"overlay", "cover"} and suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+            raise ValueError("请选择 PNG、JPG 或 WebP 图片；透明贴图推荐 PNG")
         if kind == "video" and suffix not in {
             ".mp4",
             ".mov",
@@ -759,7 +895,7 @@ def create_app(settings: Settings) -> FastAPI:
             ".webp",
         }:
             raise ValueError("请选择视频或图片素材")
-        if kind not in {"bgm", "video"}:
+        if kind not in {"bgm", "video", "overlay", "cover"}:
             raise ValueError("未知素材类型")
         relative = f"assets/{uuid.uuid4().hex}{suffix}"
         target = p.root / relative
@@ -769,27 +905,43 @@ def create_app(settings: Settings) -> FastAPI:
             with target.open("wb") as f:
                 while chunk := await file.read(1024 * 1024):
                     size += len(chunk)
-                    if size > 500 * 1024 * 1024:
-                        raise ValueError("单个素材上限 500 MB")
+                    limit = 32 if kind in {"overlay", "cover"} else 500
+                    if size > limit * 1024 * 1024:
+                        raise ValueError(f"单个素材上限 {limit} MB")
                     f.write(chunk)
             details = (
-                await run_in_threadpool(validate_asset, target, suffix) if kind == "video" else {}
+                await run_in_threadpool(validate_asset, target, suffix)
+                if kind in {"video", "overlay", "cover"}
+                else {}
             )
             mutable_project(name)
             with lock(p.root / ".project.lock"):
-                if kind == "video":
+                if kind in {"video", "overlay", "cover"}:
                     config = video_config(p)
-                    if len(config["assets"]) >= 100:
+                    if kind == "video" and len(config["assets"]) >= 100:
                         raise ValueError("每个工程最多 100 个视频素材")
-                    config["assets"].append(
-                        {
-                            "id": target.stem,
-                            "path": relative,
-                            "name": Path(file.filename).name,
-                            "bytes": size,
-                            **details,
-                        }
-                    )
+                    asset = {
+                        "id": target.stem,
+                        "path": relative,
+                        "name": Path(file.filename).name,
+                        "bytes": size,
+                        **details,
+                    }
+                    if kind == "overlay":
+                        if len(config["overlays"]) >= 12:
+                            raise ValueError("每个工程最多 12 张贴图")
+                        placement = OverlayEdit(
+                            id=asset["id"], x=0.05 if len(config["overlays"]) % 2 == 0 else 0.55
+                        )
+                        # Width is a normalized placement value; preserve source dimensions separately.
+                        asset["source_width"] = asset.pop("width")
+                        asset["source_height"] = asset.pop("height")
+                        config["overlays"].append({**asset, **placement.model_dump()})
+                    elif kind == "cover":
+                        config["cover"]["image"] = asset
+                        config["cover"]["options"].update(background="image", enabled=True)
+                    else:
+                        config["assets"].append(asset)
                     write_json(p.root / "video.json", config)
                     return config
                 media = read_json(p.root / "media.json", {})
@@ -1016,6 +1168,8 @@ def create_app(settings: Settings) -> FastAPI:
         result = []
         for task in list(tasks.values())[-30:]:
             item = dict(task)
+            # True while a model call of this task is open and can be followed live.
+            item["streaming"] = task["id"] in aborts
             # Older task records stored no timing or stage; avoid invented line counts.
             if "started_at" in task:
                 item["elapsed_seconds"] = max(
@@ -1037,7 +1191,67 @@ def create_app(settings: Settings) -> FastAPI:
         if key not in events:
             raise HTTPException(404, "当前服务没有该任务")
         events[key].set()
+        abort = aborts.get(key)
+        if abort:
+            abort()
         return {"pause_requested": True}
+
+    @app.get("/api/tasks/{key}/stream")
+    async def task_stream(key: str, request: Request):
+        """Server-sent events with the model output of a running LLM task."""
+        if key not in tasks:
+            raise HTTPException(404, "当前服务没有该任务")
+
+        async def events_source():
+            phase, sent, version = None, 0, -1
+            yield "retry: 1500\n\n"
+            while True:
+                task, live = tasks[key], streams.get(key)
+                if live and live["version"] != version:
+                    version = live["version"]
+                    if live["phase"] != phase:
+                        phase, sent = live["phase"], 0
+                    body = {
+                        "kind": live["kind"],
+                        "phase": phase,
+                        "from": sent,
+                        "chars": len(live["text"]),
+                        "reasoning": live["reasoning"],
+                    }
+                    if live["kind"] == "generate":
+                        body["lines"] = live["lines"][sent:]
+                        sent = len(live["lines"])
+                    else:
+                        body["text"] = live["text"][sent:]
+                        sent = len(live["text"])
+                    yield "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"
+                if task["status"] not in {"queued", "running"}:
+                    yield (
+                        "event: end\ndata: "
+                        + json.dumps(
+                            {"status": task["status"], "error": task.get("error")},
+                            ensure_ascii=False,
+                        )
+                        + "\n\n"
+                    )
+                    return
+                if await request.is_disconnected():
+                    return
+                await asyncio.sleep(0.15)
+
+        return StreamingResponse(
+            events_source(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
+    @app.get("/api/tasks/{key}/llm")
+    def task_llm_output(key: str):
+        """Full raw model output and diagnostics of the latest model call in a task."""
+        runs = sorted(llm_runs.glob(f"{key}-*.json"), key=lambda p: int(p.stem.rsplit("-", 1)[1]))
+        if not runs:
+            raise HTTPException(404, "该任务没有模型输出记录")
+        return read_json(runs[-1])
 
     @app.get("/api/voices/previews")
     def voice_preview_history():

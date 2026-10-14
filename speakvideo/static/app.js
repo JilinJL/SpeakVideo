@@ -21,6 +21,7 @@ const TABS = ['script', 'binding', 'production', 'video'];
 const TASK_LABELS = {brief: '写对话草稿', extend: '扩展对话', generate: '生成台词', synth: '合成配音', retry: '重试单行', merge: '合并导出', render: '合成视频', run: '完整音频工作流', design: '试音', create: '固化音色', sync: '刷新音色库', preview: '音色试听', llm_test: 'LLM 连接测试'};
 const TASK_STATES = {queued: '排队中', running: '执行中', succeeded: '完成', failed: '失败', paused: '已暂停', interrupted: '被中断'};
 TASK_LABELS.package = '打包交付';
+TASK_LABELS.cover = '导出封面';
 const LINE_STATES = {succeeded: '已合成', failed: '失败', running: '合成中', pending: '待合成'};
 
 const icon = name => `<svg class="ico" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -48,21 +49,45 @@ function toast(message, isError = false) {
   const host = $('toast');
   if ([...host.children].some(el => el.dataset.message === String(message))) return;
   const item = document.createElement('div'); item.dataset.message = String(message);
-  while (host.childElementCount >= 5) host.firstElementChild.remove();
+  while (host.childElementCount >= 5) {
+    const oldest = host.firstElementChild;
+    if (oldest.dismiss) oldest.dismiss(); else oldest.remove();
+  }
   item.className = `message ${isError ? 'error' : 'success'}`;
   item.setAttribute('role', isError ? 'alert' : 'status');
+  item.tabIndex = 0; item.title = '点击关闭消息';
   const symbol = document.createElement('span'); symbol.className = 'message-symbol'; symbol.textContent = isError ? '!' : '✓';
+  const body = document.createElement('div'); body.className = 'message-body';
   const content = document.createElement('span'); content.textContent = message;
+  const countdown = document.createElement('span'); countdown.className = 'message-countdown'; countdown.setAttribute('aria-hidden', 'true');
   const close = document.createElement('button'); close.className = 'message-close'; close.textContent = '×'; close.setAttribute('aria-label', '关闭消息');
-  item.append(symbol, content, close); host.append(item);
+  body.append(content, countdown); item.append(symbol, body, close); host.append(item);
   // Popovers share the browser top layer with dialogs, so feedback stays visible.
   placeMessages();
-  let timer;
-  const dismiss = () => { clearTimeout(timer); item.remove(); if (!host.childElementCount) { if (host.hidePopover) host.hidePopover(); else host.style.display = 'none'; } };
-  close.onclick = dismiss;
-  const schedule = () => timer = setTimeout(dismiss, isError ? 12000 : 4500);
-  item.onpointerenter = () => clearTimeout(timer); item.onpointerleave = schedule;
-  schedule();
+  let timer, remaining = isError ? 12000 : 5000, deadline = 0, hovering = false, focused = false, dismissed = false;
+  const dismiss = item.dismiss = () => {
+    if (dismissed) return;
+    dismissed = true; clearInterval(timer); item.remove();
+    if (!host.childElementCount) { if (host.hidePopover) host.hidePopover(); else host.style.display = 'none'; }
+  };
+  const tick = () => {
+    remaining = Math.max(0, deadline - performance.now());
+    if (!remaining) return dismiss();
+    countdown.textContent = `${Math.ceil(remaining / 1000)} 秒后关闭 · 点击关闭`;
+  };
+  const updateTimer = () => {
+    if (dismissed) return;
+    if (timer) { remaining = Math.max(0, deadline - performance.now()); clearInterval(timer); timer = null; }
+    if (hovering || focused) countdown.textContent = `剩余 ${Math.ceil(remaining / 1000)} 秒 · 已暂停 · 点击关闭`;
+    else { deadline = performance.now() + remaining; tick(); if (!dismissed) timer = setInterval(tick, 100); }
+  };
+  item.onclick = dismiss;
+  item.onkeydown = event => { if (event.target === item && ['Enter', ' '].includes(event.key)) { event.preventDefault(); dismiss(); } };
+  item.onpointerenter = () => { hovering = true; updateTimer(); };
+  item.onpointerleave = () => { hovering = false; updateTimer(); };
+  item.onfocusin = () => { focused = true; updateTimer(); };
+  item.onfocusout = event => { if (!item.contains(event.relatedTarget)) { focused = false; updateTimer(); } };
+  updateTimer();
 }
 async function api(path, method = 'GET', body) {
   let response;
@@ -84,7 +109,7 @@ const speakerIndex = slot => Math.max(0, data.script.cast.findIndex(c => c.slot 
 const speakerVar = slot => `--speaker: var(--s${speakerIndex(slot)})`;
 
 function setSaveState(text, isDirty = false) { $('saveState').textContent = text; $('saveState').classList.toggle('dirty', isDirty); }
-function markDirty() { dirty = true; setSaveState('未保存', true); renderSteps(); }
+function markDirty() { dirty = true; setSaveState('未保存', true); renderSteps(); renderDraftTimeline(); }
 
 /* ───────── 左栏：工程与音色 ───────── */
 function renderProjects() {
@@ -175,6 +200,10 @@ async function selectProject(name, {keepTab = false, tab: preferredTab = null} =
   document.title = `${data.script.meta.topic || current} - SpeakVideo 音频工作台`;
   $('topic').value = data.script.meta.topic; $('keywords').value = data.script.meta.keywords.join(', ');
   $('guidance').value = data.script.meta.guidance || ''; $('brief').value = data.script.meta.brief;
+  if ($('draftSettings').dataset.project !== current) {
+    $('draftSettings').dataset.project = current;
+    $('draftSettings').open = !$('brief').value.trim();
+  }
   for (const key of ['brief', 'structure']) {
     const custom = data.script.meta.prompts?.[key] || '';
     $(`${key}Prompt`).value = custom.trim() ? custom : config.script_prompts[key];
@@ -187,7 +216,8 @@ async function selectProject(name, {keepTab = false, tab: preferredTab = null} =
     `<label class="field" style="${speakerVar(m.slot)}"><span><span class="dot" style="background:var(--speaker)"></span>${escape(m.slot)} 人设</span><textarea rows="3" maxlength="2000" data-persona="${escape(m.slot)}">${escape(m.persona)}</textarea></label>`).join('');
   $$('textarea', $('personas')).forEach(input => input.oninput = () => { data.script.cast.find(m => m.slot === input.dataset.persona).persona = input.value; markDirty(); });
 
-  renderLines(); renderBindings(); renderReport(data.preflight); renderMedia(); updateExports(); renderVideo();
+  if (live && live.project !== current) stopFollowing();
+  renderLines(); renderBindings(); renderReport(data.preflight); renderMedia(); updateExports(); renderVideo(); renderLive();
   const requested = new URLSearchParams(location.search).get('tab');
   let tab = defaultTab();
   if (TABS.includes(preferredTab)) tab = preferredTab;
@@ -246,6 +276,8 @@ function validateLineInput(input) {
   input.setCustomValidity(valid ? '' : '每行台词须为 3–200 字');
 }
 function renderLines() {
+  if (liveRunning() && live.kind === 'generate') return renderStreamingLines();
+  delete $('lines').dataset.streaming;
   const lines = data.script.lines;
   const slots = data.script.cast.map(c => c.slot);
   renderLineStats();
@@ -370,6 +402,26 @@ async function save() {
 }
 
 /* ───────── 生成 ───────── */
+function renderDraftTimeline() {
+  if (!data) return;
+  const hasBrief = !!$('brief').value.trim(), on = liveRunning();
+  const drafting = on && ['brief', 'extend'].includes(live.kind);
+  const generating = on && live.kind === 'generate';
+  const busy = videoUploading || on || lastTasks.some(t => t.project === current && activeTask(t.status));
+  $('draftSettings').classList.toggle('complete', hasBrief && !drafting);
+  $('draftSettings').setAttribute('aria-current', !hasBrief || drafting ? 'step' : 'false');
+  $('draftToLines').classList.toggle('active', hasBrief || drafting);
+  $('draftToLines').setAttribute('aria-current', hasBrief && !drafting ? 'step' : 'false');
+  $('draftStepState').textContent = drafting ? '正在生成草稿' : generating ? '正在生成台词' : hasBrief ? '编辑草稿，确认后生成台词' : '等待草稿';
+  const draftButton = document.querySelector('[data-action="brief"]');
+  draftButton.firstChild.textContent = hasBrief ? '重新生成草稿' : '生成草稿';
+  draftButton.disabled = busy || !$('topic').value.trim();
+  document.querySelector('[data-action="extend"]').disabled = busy || !hasBrief;
+  document.querySelector('[data-action="generate"]').disabled = busy || !hasBrief;
+  $('draftGenerateHint').textContent = hasBrief ? '按当前草稿生成；重新生成会替换全部台词，旧版自动保留。' : '先生成或填写草稿，再生成台词。';
+  // A running request uses a saved snapshot; keep its draft stable until it finishes.
+  $('brief').readOnly = on;
+}
 function renderReport(report) {
   const issues = report.errors.map(v => `<div class="issue error">${escape(v)}</div>`).join('') + report.warnings.map(v => `<div class="issue warning">${escape(v)}</div>`).join('');
   $('report').innerHTML = `<div class="report-summary">
@@ -408,13 +460,121 @@ function updateExports() {
 }
 async function action(type, lineId) {
   if (videoUploading) throw Error('请等待素材上传完成');
+  if (type === 'brief' && !$('topic').value.trim()) throw Error('请先填写话题，再生成草稿');
+  if (type === 'generate' && !$('brief').value.trim()) throw Error('请先生成或填写草稿，再生成台词');
   if (type === 'generate' && data.script.lines.length && !confirm('重新生成将替换全部台词并清空复用记录，继续吗？')) return;
   if (type === 'extend' && !$('brief').value.trim()) throw Error('请先填写或生成草稿，再扩展对话');
   await save();
-  if (type === 'render') await saveVideo();
+  if (['render', 'cover'].includes(type)) await saveVideo();
   const task = await queue(url('/actions'), {action: type, line_id: lineId || null});
-  toast(`已加入队列：${TASK_LABELS[task.label] || task.label}`);
+  if (LLM_ACTIONS.has(type)) followLLM(task); else toast(`已加入队列：${TASK_LABELS[task.label] || task.label}`);
 }
+
+/* ───────── 流式生成：草稿逐字出现，台词逐条追加，可随时停止 ─────────
+   服务端只推送增量；停止会关闭模型连接并放弃本次结果，工程内容保持生成前的样子。 */
+const LLM_ACTIONS = new Set(['brief', 'extend', 'generate']);
+let live = null; // {task, kind, source, before, lines, text}
+function followLLM(task) {
+  if (live?.task === task.id) return;
+  stopFollowing();
+  const kind = task.label === 'extend' ? 'extend' : task.label;
+  if (['brief', 'extend'].includes(kind)) $('draftSettings').open = false;
+  live = {task: task.id, project: current, kind, before: {brief: $('brief').value, lines: data.script.lines}, lines: [], text: '', phase: 0};
+  renderLive();
+  const source = live.source = new EventSource(`/api/tasks/${task.id}/stream`);
+  source.onmessage = event => {
+    if (!live || live.source !== source) return;
+    const chunk = JSON.parse(event.data);
+    // “完整工作流”会先写草稿再生成台词，阶段切换时换一个显示目标
+    if (chunk.phase !== live.phase) { live.phase = chunk.phase; live.kind = chunk.kind; live.text = ''; live.lines = []; }
+    live.reasoning = chunk.reasoning; live.chars = chunk.chars;
+    // from 是这段增量的起点；断线重连时服务端从头补发，按起点对齐避免重复
+    if (chunk.lines) live.lines = [...live.lines.slice(0, chunk.from), ...chunk.lines];
+    if (chunk.text != null) live.text = live.text.slice(0, chunk.from) + chunk.text;
+    renderLive();
+  };
+  source.addEventListener('end', () => { source.close(); if (live?.source === source) live.source = null; });
+  source.onerror = () => { if (source.readyState === EventSource.CLOSED && live?.source === source) live.source = null; };
+}
+function stopFollowing(restore = false) {
+  if (!live) return;
+  live.source?.close();
+  const was = live; live = null;
+  // 停止或失败：撤回流式显示；成功：保留到重新载入工程为止，避免闪回旧内容
+  if (restore && was.project === current && data) { $('brief').value = was.before.brief; delete $('lines').dataset.streaming; renderLines(); }
+  renderLive();
+}
+function liveRunning() { return !!live && live.project === current; }
+function renderLive() {
+  const on = liveRunning(), kind = live?.kind;
+  const lineKind = on && kind === 'generate', briefKind = on && (kind === 'brief' || kind === 'extend');
+  $$('[data-stop-llm]').forEach(b => b.hidden = !(b.dataset.stopLlm === 'generate' ? lineKind : briefKind));
+  $$('[data-discard-llm]').forEach(b => b.hidden = !(b.dataset.discardLlm === 'generate' ? lineKind : briefKind));
+  document.querySelector('[data-action="brief"]').hidden = briefKind;
+  $('addLine').hidden = lineKind; document.querySelector('[data-approve="script"]').hidden = lineKind;
+  $('brief').readOnly = briefKind; $('brief').classList.toggle('streaming', briefKind);
+  $('briefLive').hidden = !briefKind;
+  if (briefKind) {
+    const thinking = !live.text && live.reasoning;
+    $('briefLive').textContent = thinking ? `思考中 · ${live.reasoning.toLocaleString()} 字` : live.text ? `生成中 · ${(live.chars || 0).toLocaleString()} 字` : '等待模型响应…';
+    $('brief').value = kind === 'extend' ? `${live.before.brief}\n\n${live.text}` : live.text;
+    if (live.text) $('brief').scrollTop = $('brief').scrollHeight;
+  }
+  if (lineKind) renderStreamingLines();
+  renderDraftTimeline();
+}
+function renderStreamingLines() {
+  const box = $('lines');
+  if (!box.dataset.streaming) { box.dataset.streaming = 'true'; box.innerHTML = '<div class="stream-lines"></div><div class="stream-tail"></div>'; }
+  const list = box.querySelector('.stream-lines');
+  while (list.childElementCount > live.lines.length) list.lastElementChild.remove();
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  for (const line of live.lines.slice(list.childElementCount)) {
+    const slot = ['p1', 'p2'].includes(line.slot) ? line.slot : 'p1';
+    const row = document.createElement('div');
+    row.className = 'line streamed'; row.setAttribute('style', speakerVar(slot));
+    row.innerHTML = `<span class="handle" aria-hidden="true"></span><div class="line-body"><div class="line-bar"><b class="stream-slot">${escape(line.slot || '?')}</b><span class="stream-mood">${escape(config.moods?.[line.mood] || line.mood || '')}</span><span class="stream-pause">${escape(line.pause_after_ms ?? '')} ms</span><span class="meta"><span>${escape(line.id || '')}</span></span></div><p class="stream-words">${escape(line.words || '')}</p></div>`;
+    list.append(row);
+  }
+  const thinking = !live.lines.length && live.reasoning;
+  box.querySelector('.stream-tail').innerHTML = `<span class="stream-dot"></span>${thinking ? `模型思考中 · 已推理 ${live.reasoning.toLocaleString()} 字` : live.lines.length ? `已生成 ${live.lines.length} 行，继续生成中…` : live.chars ? '正在输出台词…' : '等待模型响应…'}`;
+  $('lineStats').textContent = `生成中 · ${live.lines.length} 行`;
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+// 停止：保留已生成的部分，作为未保存修改放进编辑区，确认后点保存即可；放弃：恢复生成前的内容
+const stoppedTasks = new Set();
+async function stopLLM({keep = true} = {}) {
+  if (!live) return;
+  const was = live, id = was.task;
+  stoppedTasks.add(id); // 防止轮询在暂停请求返回前又接上这条流
+  stopFollowing(!keep);
+  if (keep && was.project === current && data) {
+    if (was.kind === 'generate') {
+      const slots = data.script.cast.map(c => c.slot), ids = new Set();
+      const kept = was.lines.filter(l => typeof l.words === 'string' && l.words.trim()).map((l, i) => {
+        let lineId = /^[A-Za-z0-9_-]{1,30}$/.test(l.id || '') && !ids.has(l.id) ? l.id : `L${String(i + 1).padStart(3, '0')}`;
+        while (ids.has(lineId)) lineId += 'x';
+        ids.add(lineId);
+        return {id: lineId, slot: slots.includes(l.slot) ? l.slot : slots[i % slots.length], words: l.words.trim(),
+          mood: config.moods?.[l.mood] ? l.mood : 'normal', pause_after_ms: Number.isInteger(l.pause_after_ms) ? Math.min(10000, Math.max(0, l.pause_after_ms)) : 300};
+      });
+      if (kept.length) { data.script.lines = kept; markDirty(); }
+      delete $('lines').dataset.streaming; renderLines(); renderBindings();
+      await api(`/api/tasks/${id}/pause`, 'POST', {});
+      toast(kept.length ? `已停止生成，保留已生成的 ${kept.length} 行台词。确认无误后点“保存”` : '已停止生成，还没有完整的台词行，台词保持原样');
+      return;
+    }
+    if (was.text.trim()) { $('brief').value = was.kind === 'extend' ? `${was.before.brief}\n\n${was.text.trim()}` : was.text.trim(); markDirty(); }
+    else $('brief').value = was.before.brief;
+    await api(`/api/tasks/${id}/pause`, 'POST', {});
+    toast(was.text.trim() ? `已停止生成，保留已生成的 ${was.text.trim().length.toLocaleString()} 字草稿。确认无误后点“保存”` : '已停止生成，还没有输出内容，草稿保持原样');
+    return;
+  }
+  await api(`/api/tasks/${id}/pause`, 'POST', {});
+  toast('已放弃本次生成，草稿和台词恢复为生成前的样子');
+}
+$$('[data-stop-llm]').forEach(b => b.onclick = () => safe(() => stopLLM()));
+$$('[data-discard-llm]').forEach(b => b.onclick = () => safe(() => stopLLM({keep: false})));
 
 /* ───────── 视频工作台 ───────── */
 function renderVideoAssets() {
@@ -452,6 +612,7 @@ function renderVideo() {
   $('videoSubtitleLegend').innerHTML = data.script.cast.map(member => `<span><i style="background:${escape(config.subtitle_colors?.[member.slot] || '#FFFFFF')}"></i>${escape(data.cast[member.slot]?.role || member.slot)} · ${member.slot === 'p1' ? '蓝色' : '橙色'}</span>`).join('');
   $('videoAudioState').textContent = data.audio_current ? `完整音频 · ${fmtTime(data.audio_export.duration)}` : '请先合并导出完整音频';
   renderVideoAssets();
+  renderDesign();
   const meta = data.video_export, file = meta?.files?.['final.mp4'];
   $('approveVideo').disabled = !data.video_current || !data.workflow.approvals.audio;
   $('approveVideo').textContent = data.workflow.approvals.video ? '成片已确认' : '确认当前成片';
@@ -471,13 +632,11 @@ function renderVideo() {
   }
 }
 async function saveVideo() {
-  const [width, height] = $('videoSize').value.split('x').map(Number);
-  const body = {width, height, fps: Number($('videoFps').value), font_size: Number($('videoFontSize').value), image_seconds: Number($('videoImageSeconds').value), burn_subtitles: $('videoBurnSubtitles').checked, asset_ids: data.video.assets.map(a => a.id)};
-  data.video = await api(url('/video'), 'PUT', body);
+  data.video = await api(url('/video'), 'PUT', videoBody());
   videoDirty = false;
 }
 for (const id of ['videoSize', 'videoFps', 'videoImageSeconds', 'videoFontSize', 'videoBurnSubtitles']) $(id).onchange = () => {
-  videoDirty = true; markDirty();
+  videoDirty = true; markDirty(); renderDesignScene(); scheduleCoverPreview();
 };
 $('saveVideo').onclick = () => safe(async () => { await save(); await saveVideo(); await selectProject(current, {keepTab: true}); toast('视频设置已保存'); });
 $('videoFiles').onchange = () => safe(async () => {
@@ -490,7 +649,7 @@ $('videoFiles').onchange = () => safe(async () => {
       $('videoUploadState').textContent = `上传 ${i + 1}/${files.length}：${files[i].name}`;
       const form = new FormData(); form.append('file', files[i]);
       const config = await api(`/api/projects/${encodeURIComponent(name)}/assets/video`, 'POST', form);
-      if (name === current) { data.video = config; renderVideoAssets(); }
+      if (name === current) { data.video = config; renderVideoAssets(); renderDesignScene(); }
     }
     if (name === current) await selectProject(current, {keepTab: true});
     toast(`已添加 ${files.length} 个素材`);
@@ -529,10 +688,17 @@ function renderTasks() {
   $('taskBadge').textContent = active.length || '';
   const busy = videoUploading || active.some(t => t.project === current);
   $$('[data-action]').forEach(b => b.disabled = busy || (b.dataset.action === 'render' && !data?.audio_current));
+  renderDraftTimeline();
   const packageButton = document.querySelector('[data-action="package"]');
-  packageButton.disabled = busy || !data?.video_current || !data?.workflow.approvals.video;
-  $('approveVideo').disabled = busy || !data?.video_current || !data?.workflow.approvals.audio;
-  for (const id of ['videoFiles', 'saveVideo']) $(id).disabled = busy;
+  const coverReady = !data?.video.cover.options.enabled || data?.cover_current;
+  packageButton.disabled = busy || videoDirty || !coverReady || !data?.video_current || !data?.workflow.approvals.video;
+  $('approveVideo').disabled = busy || videoDirty || !coverReady || !data?.video_current || !data?.workflow.approvals.audio;
+  for (const id of ['videoFiles', 'saveVideo', 'overlayFiles', 'coverFile', 'previewCover']) $(id).disabled = busy;
+  $$('input, select, textarea, button', $('overlayControls')).forEach(el => el.disabled = busy);
+  $$('input, select, textarea', document.querySelector('.video-cover-card')).forEach(el => el.disabled = busy);
+  $('video').classList.toggle('design-busy', busy);
+  $('playDesignAudio').disabled = busy || !data?.audio_current || designMode === 'cover';
+  if (busy) stopDesignPlayback();
   $$('[data-video-move], [data-video-remove]').forEach(b => b.disabled = busy || b.dataset.boundary === 'true');
 
   $('tasks').innerHTML = tasks.slice(0, 20).map(t => {
@@ -546,13 +712,17 @@ function renderTasks() {
       <div class="task-sub">${escape(t.project || '音色工厂')} · ${escape(detail)}</div>
       ${t.status === 'running' ? `<div class="progress ${measurable ? '' : 'indeterminate'}"><i style="width:${measurable ? pct : 35}%"></i></div>` : ''}
       ${msg ? `<div class="task-msg ${t.status === 'failed' ? 'bad' : ''}">${escape(msg)}</div>` : ''}
-      ${['queued', 'running'].includes(t.status) ? `<button class="btn sm" data-pause="${escape(t.id)}">暂停</button>` : ''}
+      ${['queued', 'running'].includes(t.status) ? `<button class="btn sm" data-pause="${escape(t.id)}">${LLM_ACTIONS.has(t.label) || t.label === 'llm_test' ? '停止' : '暂停'}</button>` : ''}
+      ${t.llm || t.log?.length ? `<button class="btn ghost sm" data-task-log="${escape(t.id)}">查看日志</button>` : ''}
     </div>`;
   }).join('') || '<div class="empty">暂无任务。生成剧本、合成或导出时会显示在这里。</div>';
   $$('[data-pause]', $('tasks')).forEach(b => b.onclick = () => safe(async () => {
+    const task = lastTasks.find(t => t.id === b.dataset.pause);
+    if (live?.task === b.dataset.pause) return stopLLM();
     await api(`/api/tasks/${b.dataset.pause}/pause`, 'POST', {});
-    toast('已请求暂停；正在进行的请求或 ffmpeg 会在当前步骤完成后停止。');
+    toast(LLM_ACTIONS.has(task?.label) ? '已停止生成' : '已请求暂停；正在进行的请求或 ffmpeg 会在当前步骤完成后停止。');
   }));
+  $$('[data-task-log]', $('tasks')).forEach(b => b.onclick = () => { terminalFocus = b.dataset.taskLog; setTerminal({hidden: false, open: true}); });
 }
 async function pollTasks() {
   if (tasksPolling) return;
@@ -561,6 +731,25 @@ async function pollTasks() {
   const tasks = await api('/api/tasks');
   lastTasks = tasks;
   renderTasks();
+  const followed = live && tasks.find(t => t.id === live.task);
+  // 完整工作流写完台词后进入配音：退出流式视图，回到可编辑的台词列表
+  if (live && followed?.label === 'run' && activeTask(followed.status) && !followed.streaming && live.phase) {
+    stopFollowing(); if (!dirty && current) { delete $('lines').dataset.streaming; await selectProject(current, {keepTab: true}); }
+  }
+  else if (live && (!followed || !activeTask(followed.status))) {
+    const ok = followed?.status === 'succeeded', mine = live.project === current;
+    stopFollowing(!ok);
+    // 成功后直接载入新结果；有未保存修改时只替换生成的部分，不动其他输入
+    if (ok && mine && dirty) {
+      const fresh = await api(url(''));
+      if (followed.label === 'generate' || followed.label === 'run') { data.script.lines = fresh.script.lines; data.manifest = fresh.manifest; }
+      if (followed.label !== 'generate') $('brief').value = fresh.script.meta.brief;
+      delete $('lines').dataset.streaming; renderLines(); renderBindings();
+    }
+  }
+  // 刷新页面或切回工程时，接上仍在进行的模型输出
+  const resumable = current && !live && tasks.find(t => t.project === current && t.streaming && t.label !== 'llm_test' && !stoppedTasks.has(t.id));
+  if (resumable) followLLM(resumable);
   let refresh = false, homeChanged = false, historyChanged = false;
   for (const t of tasks) {
     const prev = taskStatus.get(t.id);
@@ -569,8 +758,8 @@ async function pollTasks() {
       if (t.project === current && ['succeeded', 'failed', 'paused'].includes(t.status)) refresh = true;
       if (t.status === 'succeeded' && ['design','preview','create'].includes(t.label)) historyChanged = true;
       if (t.status === 'succeeded' && t.label !== 'create') toast(`${TASK_LABELS[t.label] || t.label}已完成${t.label === 'llm_test' && t.result ? `：${t.result}` : ''}`);
-      if (['paused','interrupted'].includes(t.status)) toast(`${TASK_LABELS[t.label] || t.label}${TASK_STATES[t.status]}`);
-      if (t.status === 'failed') toast(`${TASK_LABELS[t.label] || t.label}失败：${t.error || ''}`, true);
+      if (['paused','interrupted'].includes(t.status) && !(LLM_ACTIONS.has(t.label) && t.status === 'paused')) toast(`${TASK_LABELS[t.label] || t.label}${TASK_STATES[t.status]}`);
+      if (t.status === 'failed') { toast(`${TASK_LABELS[t.label] || t.label}失败：${t.error || ''}${t.llm ? '\n完整日志和模型原始输出见终端。' : ''}`, true); if (t.llm && t.project === current) setTerminal({hidden: false, open: true}); }
       if (t.status === 'succeeded' && !t.project && t.label === 'design') {
         if (t.id === currentDesignTask) {
           factoryFinishing = 'design'; renderFactoryTasks(); setRef('试音已生成，正在准备波形与播放器…');
@@ -606,10 +795,10 @@ async function pollTasks() {
   store.set('voicePreviewTasks', [...previewTasks].filter(([id]) => !id.startsWith('submitting:')).slice(-50));
   renderPreviewState(); renderFactoryTasks(); if (historyChanged) await refreshVoiceHistory();
   // 运行中也同步行状态，让进度点实时变化
-  const running = tasks.some(t => t.project === current && t.status === 'running');
+  const running = tasks.some(t => t.project === current && t.status === 'running' && !LLM_ACTIONS.has(t.label));
   if ((refresh || running) && !dirty && current) {
     if (refresh) await selectProject(current, {keepTab: true});
-    else { data = {...data, ...(await api(url('')))}; data.workflow.approvals ||= {}; renderLineMap(); renderLineStats(); $$('.line').forEach(row => { const s = lineStatus(row.dataset.id); const el = row.querySelector('.status'); el.className = `status ${s}`; el.textContent = LINE_STATES[s] || s; }); }
+    else { data = {...data, ...(await api(url('')))}; data.workflow.approvals ||= {}; renderLineMap(); renderLineStats(); $$('.line').forEach(row => { const s = lineStatus(row.dataset.id); const el = row.querySelector('.status'); if (!el) return; el.className = `status ${s}`; el.textContent = LINE_STATES[s] || s; }); }
   }
   } finally { tasksPolling = false; }
 }
@@ -988,10 +1177,10 @@ document.addEventListener('play', event => { if (event.target instanceof HTMLAud
 /* ───────── 多供应商 LLM ───────── */
 function renderLLM() {
   $('llmFailover').checked = llmDraft.failover;
-  $('llmProviders').innerHTML = llmDraft.providers.map(p => `<section class="provider-card" data-provider="${escape(p.id)}"><div class="row"><label class="check"><input type="radio" name="llmActive" value="${escape(p.id)}" ${p.id === llmDraft.active_provider ? 'checked' : ''}>默认模型</label><label class="check"><input type="checkbox" data-llm-field="enabled" ${p.enabled ? 'checked' : ''}>启用</label><button class="btn ghost sm danger" data-remove-provider>移除供应商</button></div><div class="grid-2"><label class="field">供应商名称<input data-llm-field="name" value="${escape(p.name)}"></label><label class="field">模型<input data-llm-field="model" value="${escape(p.model)}" placeholder="step-5-preview"></label></div><label class="field">Base URL<input data-llm-field="base_url" value="${escape(p.base_url)}" placeholder="https://api.stepfun.com/step_plan/v1"></label><label class="field">API Key（每行一个）<textarea data-llm-field="new_keys" rows="2" autocomplete="off" spellcheck="false" placeholder="${p.key_count ? `已有 ${p.key_count} 个 Key；留空保留，填写则全部替换` : '填写 API Key；本地免认证服务可留空'}">${escape(p.new_keys || '')}</textarea></label><label class="check"><input type="checkbox" data-llm-field="clear_keys" ${p.clear_keys ? 'checked' : ''}>清除已保存 Key</label><div class="row"><label class="check"><input type="checkbox" data-llm-field="json_mode" ${p.json_mode ? 'checked' : ''}>支持 JSON Mode</label><label class="field inline-field">超时（秒）<input type="number" min="1" max="3600" data-llm-field="timeout_seconds" value="${p.timeout_seconds}"></label><label class="field inline-field">输出 Token 上限<input type="number" min="32" max="131072" data-llm-field="max_tokens" value="${p.max_tokens}"></label></div></section>`).join('');
+  $('llmProviders').innerHTML = llmDraft.providers.map(p => `<section class="provider-card" data-provider="${escape(p.id)}"><div class="row"><label class="check"><input type="radio" name="llmActive" value="${escape(p.id)}" ${p.id === llmDraft.active_provider ? 'checked' : ''}>默认模型</label><label class="check"><input type="checkbox" data-llm-field="enabled" ${p.enabled ? 'checked' : ''}>启用</label><button class="btn ghost sm danger" data-remove-provider>移除供应商</button></div><div class="grid-2"><label class="field">供应商名称<input data-llm-field="name" value="${escape(p.name)}"></label><label class="field">模型<input data-llm-field="model" value="${escape(p.model)}" placeholder="step-5-preview"></label></div><label class="field">Base URL<input data-llm-field="base_url" value="${escape(p.base_url)}" placeholder="https://api.stepfun.com/step_plan/v1"></label><label class="field">API Key（每行一个）<textarea data-llm-field="new_keys" rows="2" autocomplete="off" spellcheck="false" placeholder="${p.key_count ? `已有 ${p.key_count} 个 Key；留空保留，填写则全部替换` : '填写 API Key；本地免认证服务可留空'}">${escape(p.new_keys || '')}</textarea></label><label class="check"><input type="checkbox" data-llm-field="clear_keys" ${p.clear_keys ? 'checked' : ''}>清除已保存 Key</label><div class="row"><label class="check"><input type="checkbox" data-llm-field="json_mode" ${p.json_mode ? 'checked' : ''}>支持 JSON Mode</label><label class="check" title="边生成边显示，可随时停止；供应商不支持时自动按普通请求处理"><input type="checkbox" data-llm-field="stream" ${p.stream !== false ? 'checked' : ''}>流式输出</label><label class="field inline-field" title="流式时为两段输出之间的最长等待">无响应超时（秒）<input type="number" min="1" max="3600" data-llm-field="timeout_seconds" value="${p.timeout_seconds}"></label><label class="field inline-field">输出上限（tokens）<input type="number" min="32" max="2000000" data-llm-field="max_tokens" value="${p.max_tokens ?? ''}" placeholder="不限"></label></div></section>`).join('');
   $$('[data-provider]').forEach(row => {
     const p = llmDraft.providers.find(p => p.id === row.dataset.provider);
-    $$('[data-llm-field]', row).forEach(el => el.oninput = () => p[el.dataset.llmField] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value);
+    $$('[data-llm-field]', row).forEach(el => el.oninput = () => p[el.dataset.llmField] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? (el.value === '' ? null : Number(el.value)) : el.value);
     row.querySelector('[name="llmActive"]').onchange = () => llmDraft.active_provider = p.id;
     row.querySelector('[data-remove-provider]').onclick = () => { llmDraft.providers = llmDraft.providers.filter(x => x.id !== p.id); if (llmDraft.active_provider === p.id) llmDraft.active_provider = llmDraft.providers[0]?.id || ''; renderLLM(); };
   });
@@ -1071,7 +1260,7 @@ document.addEventListener('keydown', event => {
 /* ───────── 脚本提示词 ─────────
    打开时记下快照；取消或 Esc 撤回到快照，“保存提示词”才写入工程。 */
 const PROMPT_HINTS = {
-  brief: '点“写对话草稿”时使用。人设和本次要求在草稿卡片里填写，这里只管写法。',
+  brief: '第一步“生成草稿”时使用。话题、关键词、本次要求和人设在创作设定里填写。',
   structure: '点“生成台词”时使用。实际请求由这份写法加上固定的 JSON 规范组成。',
   contract: '每次生成台词都会自动附加，只读。两组完整的输入、输出示例演示草稿转换、长回答拆行和无草稿生成。',
 };
@@ -1318,7 +1507,7 @@ $('libraryDialog').addEventListener('cancel', event => {
 $('openLLM').onclick = () => safe(async () => { llmDraft = await api('/api/llm/config'); renderLLM(); $('llmDialog').showModal(); });
 $('closeLLM').onclick = () => $('llmDialog').close();
 $('addLLMProvider').onclick = () => {
-  const p = {id: 'provider-' + crypto.randomUUID().slice(0, 8), name: '', base_url: '', model: '', enabled: true, json_mode: true, timeout_seconds: 180, max_tokens: 8192, key_count: 0};
+  const p = {id: 'provider-' + crypto.randomUUID().slice(0, 8), name: '', base_url: '', model: '', enabled: true, json_mode: true, stream: true, timeout_seconds: 180, max_tokens: null, key_count: 0};
   llmDraft.failover = $('llmFailover').checked; llmDraft.providers.push(p); llmDraft.active_provider ||= p.id; renderLLM();
 };
 $('saveLLM').onclick = () => safe(saveLLM);
@@ -1338,6 +1527,7 @@ $('saveTTSMode').onclick = () => safe(async () => {
 
 /* ───────── 终端：可拖动、可折叠、可隐藏，位置记在本机 ───────── */
 const terminal = store.get('terminal', {hidden: false, open: false, right: 16, bottom: 16});
+let terminalFocus = '';
 function clampTerminal() {
   const el = $('terminal'); if (el.hidden) return;
   const maxRight = Math.max(8, innerWidth - el.offsetWidth - 8), maxBottom = Math.max(8, innerHeight - el.offsetHeight - 8);
@@ -1354,7 +1544,7 @@ function setTerminal(patch = {}, remember = true) {
   $('showTerminal').setAttribute('aria-pressed', String(!terminal.hidden));
   $('terminalState').textContent = terminal.hidden ? '已隐藏' : '';
   clampTerminal(); if (remember) store.set('terminal', terminal);
-  if (!terminal.hidden && terminal.open) refreshRuntime();
+  if (!terminal.hidden && terminal.open) refreshRuntime().then(() => { terminalFocus = ''; });
 }
 async function refreshRuntime() {
   if (runtimeBusy) return;
@@ -1370,8 +1560,25 @@ async function refreshRuntime() {
       lines.push(`Windows 队列: ${m.queue_depth ?? '未知'} · 运行任务: ${m.current_job_id || '空闲'}`);
       for (const log of m.logs || []) lines.push(`[Windows] ${log}`);
     } else lines.push(`资源监控: ${r.metrics_status}`);
-    for (const t of r.tasks.slice(-8)) lines.push(`[${TASK_STATES[t.status] || t.status}] ${TASK_LABELS[t.label] || t.label} ${t.project || ''} · ${taskDetail(t)}${t.error ? ` · ${t.error}` : ''}`);
-    $('terminalOutput').textContent = lines.join('\n');
+    for (const t of r.tasks.slice(-8)) lines.push(`[${TASK_STATES[t.status] || t.status}] ${TASK_LABELS[t.label] || t.label} ${t.project || ''} · ${taskDetail(t)}${t.error && !taskDetail(t).includes(t.error) ? ` · ${t.error}` : ''}`);
+    // 最近一次模型调用（或点「查看日志」选中的任务）展开完整过程和原始输出
+    const focus = r.tasks.find(t => t.id === terminalFocus) || [...r.tasks].reverse().find(t => t.llm || t.log?.length);
+    if (focus) {
+      const stamp = at => new Date(at * 1000).toLocaleTimeString();
+      lines.push('', `──── ${TASK_LABELS[focus.label] || focus.label} ${focus.project || ''} · ${TASK_STATES[focus.status] || focus.status} ────`);
+      for (const entry of focus.log || []) lines.push(`[${stamp(entry.at)}] ${entry.message}`);
+      const l = focus.llm;
+      if (l) {
+        lines.push(`供应商: ${l.endpoint || '未知'}${l.request_id ? ` · 请求 ID ${l.request_id}` : ''}`);
+        lines.push(`结束原因: ${l.finish_reason || '无'} · 正文 ${l.content_chars.toLocaleString()} 字${l.reasoning_chars ? ` · 推理 ${l.reasoning_chars.toLocaleString()} 字` : ''}${l.usage_text ? ` · ${l.usage_text}` : ''}`);
+        if (l.error && !(focus.log || []).some(entry => entry.message.includes(l.error))) lines.push(`错误: ${l.error}`);
+        if (l.output_tail) lines.push('模型输出末尾:', l.output_tail);
+        lines.push(`完整原始输出: ${l.file}`);
+      }
+    }
+    const box = $('terminalOutput'), stick = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    box.textContent = lines.join('\n');
+    if (stick || terminalFocus) box.scrollTop = box.scrollHeight;
   } catch (e) { $('terminalOutput').textContent = `状态读取失败: ${e.message}`; $('terminal').dataset.state = 'bad'; $('terminalBadge').textContent = '读取失败'; }
   finally { runtimeBusy = false; clampTerminal(); }
 }
@@ -1399,6 +1606,7 @@ window.addEventListener('resize', () => { clearTimeout(growAll.t); growAll.t = s
 window.addEventListener('beforeunload', event => { if (dirty) { event.preventDefault(); event.returnValue = ''; } });
 
 /* ───────── 启动 ───────── */
+initVideoDesign();
 safe(async () => {
   config = await api('/api/config');
   $('mode').textContent = config.tts_mode === 'demo' ? '测试模式' : config.tts_mode === 'gateway' ? '网关模式' : 'Qwen 直连';
@@ -1419,5 +1627,5 @@ safe(async () => {
   });
   setInterval(() => safe(pollTasks), 2000);
   setInterval(() => { if (!document.hidden) checkConnections(); }, 30000);
-  refreshRuntime(); setInterval(() => { if (!document.hidden && !terminal.hidden && terminal.open) refreshRuntime(); }, 5000);
+  refreshRuntime(); setInterval(() => { if (!document.hidden && !terminal.hidden && terminal.open) refreshRuntime(); }, live ? 1500 : 5000);
 });

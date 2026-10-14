@@ -6,20 +6,59 @@ import hashlib
 import json
 import shutil
 import subprocess
+import tempfile
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
+from typing import Literal
 
-from PIL import Image, ImageDraw
-from pydantic import BaseModel, ConfigDict, Field
+from PIL import Image, ImageDraw, ImageOps
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .audio import audio_current
 from .media import font
 from .processing import ffmpeg, probe
 from .project import Project
 from .storage import lock, read_json, sha256, write_json
+from .video_glow import glow_image, glow_opacity, glow_track, speaking_intervals
 
 SUBTITLE_COLORS = {"p1": "#70BAFF", "p2": "#FFB266"}
-VIDEO_PIPELINE_VERSION = 2
+VIDEO_PIPELINE_VERSION = 4
+
+
+class OverlayEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    x: float = Field(default=0.05, ge=0, le=1, allow_inf_nan=False)
+    y: float = Field(default=0.22, ge=0, le=1, allow_inf_nan=False)
+    width: float = Field(default=0.4, ge=0.02, le=1, allow_inf_nan=False)
+    opacity: float = Field(default=1, ge=0, le=1, allow_inf_nan=False)
+    flip: bool = False
+    start: float = Field(default=0, ge=0, le=86400, allow_inf_nan=False)
+    end: float | None = Field(default=None, gt=0, le=86400, allow_inf_nan=False)
+    speaker_slot: Literal["", "p1", "p2"] = ""
+    speaking_glow: bool = True
+    glow_strength: float = Field(default=0.85, ge=0, le=1, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def valid_interval(self):
+        if self.end is not None and self.end <= self.start:
+            raise ValueError("贴图结束时间必须晚于开始时间")
+        return self
+
+
+class CoverOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    background: Literal["frame", "image"] = "frame"
+    frame_second: float = Field(default=0, ge=0, le=86400, allow_inf_nan=False)
+    title: str = Field(default="", max_length=120)
+    subtitle: str = Field(default="", max_length=200)
+    font_size: int = Field(default=88, ge=24, le=160)
+    title_y: float = Field(default=0.12, ge=0, le=0.85, allow_inf_nan=False)
+    color: str = Field(default="#FFFFFF", pattern=r"^#[a-fA-F0-9]{6}$")
+    shade: float = Field(default=0.25, ge=0, le=0.85, allow_inf_nan=False)
+    show_overlays: bool = True
 
 
 class VideoOptions(BaseModel):
@@ -34,6 +73,8 @@ class VideoOptions(BaseModel):
 
 class VideoEdit(VideoOptions):
     asset_ids: list[str] = Field(default_factory=list, max_length=100)
+    overlays: list[OverlayEdit] | None = Field(default=None, max_length=12)
+    cover: CoverOptions | None = None
 
 
 class VideoPaused(RuntimeError):
@@ -45,6 +86,21 @@ def video_config(project: Project) -> dict:
     return {
         "options": VideoOptions.model_validate(config.get("options", {})).model_dump(),
         "assets": config.get("assets", []),
+        "overlays": [
+            {
+                **layer,
+                **OverlayEdit.model_validate(
+                    {key: value for key, value in layer.items() if key in OverlayEdit.model_fields}
+                ).model_dump(),
+            }
+            for layer in config.get("overlays", [])
+        ],
+        "cover": {
+            "options": CoverOptions.model_validate(
+                config.get("cover", {}).get("options", {})
+            ).model_dump(),
+            "image": config.get("cover", {}).get("image"),
+        },
     }
 
 
@@ -62,7 +118,14 @@ def validate_asset(path: Path, suffix: str) -> dict:
                 image.verify()
         except (OSError, ValueError) as exc:
             raise ValueError("图片素材无法读取") from exc
-        return {"kind": "image", "duration": None}
+        with Image.open(path) as image:
+            width, height = ImageOps.exif_transpose(image).size
+            return {
+                "kind": "image",
+                "duration": None,
+                "width": width,
+                "height": height,
+            }
     try:
         info = probe(path)
         streams = [s for s in info["streams"] if s["codec_type"] == "video"]
@@ -78,14 +141,60 @@ def video_signature(project: Project, config: dict | None = None) -> str:
     config = config or video_config(project)
     audio = read_json(project.root / "exports/audio.json", {})
     data = {
-        "pipeline": VIDEO_PIPELINE_VERSION,
+        "pipeline": VIDEO_PIPELINE_VERSION
+        if has_speaking_glow(config)
+        else 3
+        if config["overlays"]
+        else 2,
         "subtitle_colors": SUBTITLE_COLORS,
         "audio": audio.get("signature"),
         "audio_files": {k: v["sha256"] for k, v in audio.get("files", {}).items()},
         "options": config["options"],
         "assets": [(a["id"], sha256(asset_path(project, a))) for a in config["assets"]],
     }
+    if config["overlays"]:
+        data["overlays"] = [
+            {**render_layer(a), "sha256": sha256(asset_path(project, a))}
+            for a in config["overlays"]
+        ]
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
+
+def has_speaking_glow(config: dict) -> bool:
+    return any(
+        layer.get("speaker_slot")
+        and layer.get("speaking_glow", True)
+        and layer.get("glow_strength", 0.85) > 0
+        for layer in config["overlays"]
+    )
+
+
+def render_layer(layer: dict) -> dict:
+    # Preserve the fingerprints of existing static stickers until glow is enabled.
+    if (
+        layer.get("speaker_slot")
+        and layer.get("speaking_glow", True)
+        and layer.get("glow_strength", 0.85) > 0
+    ):
+        return layer
+    return {
+        key: value
+        for key, value in layer.items()
+        if key not in {"speaker_slot", "speaking_glow", "glow_strength"}
+    }
+
+
+def video_timeline(project: Project) -> dict:
+    if not audio_current(project):
+        return {"lines": []}
+    audio = read_json(project.root / "exports/audio.json", {})
+    record = audio.get("files", {}).get("timeline.json")
+    if not record:
+        return {"lines": []}
+    path = (project.root / "exports" / record["path"]).resolve()
+    if not path.is_relative_to((project.root / "exports").resolve()):
+        raise ValueError("音频时间线路径越界")
+    return read_json(path, {"lines": []})
 
 
 def video_current(project: Project) -> bool:
@@ -102,6 +211,233 @@ def video_current(project: Project) -> bool:
         )
     except (OSError, ValueError, KeyError):
         return False
+
+
+def edit_config(config: dict, body: VideoEdit) -> dict:
+    """Resolve editor IDs against uploaded assets; never accept paths from a browser."""
+    assets = {asset["id"]: asset for asset in config["assets"]}
+    if len(body.asset_ids) != len(set(body.asset_ids)) or any(
+        key not in assets for key in body.asset_ids
+    ):
+        raise ValueError("素材顺序包含重复或不存在的素材")
+    config["assets"] = [assets[key] for key in body.asset_ids]
+    config["options"] = body.model_dump(exclude={"asset_ids", "overlays", "cover"})
+    if body.overlays is not None:
+        layers = {asset["id"]: asset for asset in config["overlays"]}
+        ids = [layer.id for layer in body.overlays]
+        if len(ids) != len(set(ids)) or any(key not in layers for key in ids):
+            raise ValueError("贴图列表包含重复或不存在的贴图")
+        config["overlays"] = [{**layers[layer.id], **layer.model_dump()} for layer in body.overlays]
+    if body.cover is not None:
+        if body.cover.background == "image" and not config["cover"]["image"]:
+            raise ValueError("请先上传封面底图")
+        config["cover"]["options"] = body.cover.model_dump()
+    return config
+
+
+def overlay_image(project: Project, layer: dict, options: VideoOptions):
+    with Image.open(asset_path(project, layer)) as source:
+        image = ImageOps.exif_transpose(source).convert("RGBA")
+    width = max(1, round(options.width * layer["width"]))
+    height = max(1, round(width * image.height / image.width))
+    if height > options.height:
+        width = max(1, round(width * options.height / height))
+        height = options.height
+    image = image.resize((width, height), Image.Resampling.LANCZOS)
+    if layer.get("flip"):
+        image = ImageOps.mirror(image)
+    if layer["opacity"] != 1:
+        image.putalpha(image.getchannel("A").point(lambda a: round(a * layer["opacity"])))
+    x = min(round(layer["x"] * options.width), options.width - width)
+    y = min(round(layer["y"] * options.height), options.height - height)
+    return image, x, y
+
+
+def background_frame(project: Project, config: dict, second: float) -> Image.Image:
+    """Use the same clip durations, loop and center crop as the video compositor."""
+    options = VideoOptions.model_validate(config["options"])
+    assets = config["assets"]
+    if not assets:
+        return Image.new("RGB", (options.width, options.height), "#18263e")
+    duration = read_json(project.root / "exports/audio.json", {}).get("duration", 86400)
+    lengths = [
+        min(duration, options.image_seconds if a["kind"] == "image" else a["duration"])
+        for a in assets
+    ]
+    cursor = second % sum(lengths)
+    chosen = assets[-1]
+    for asset, length in zip(assets, lengths):
+        chosen = asset
+        if cursor < length:
+            break
+        cursor -= length
+    path = asset_path(project, chosen)
+    if chosen["kind"] == "image":
+        with Image.open(path) as source:
+            picture = ImageOps.exif_transpose(source).convert("RGB")
+        return ImageOps.fit(picture, (options.width, options.height), Image.Resampling.LANCZOS)
+    with tempfile.TemporaryDirectory(prefix="speakvideo-frame-") as directory:
+        target = Path(directory) / "frame.png"
+        ffmpeg(
+            [
+                "-ss",
+                cursor,
+                "-i",
+                path,
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale={options.width}:{options.height}:force_original_aspect_ratio=increase,"
+                f"crop={options.width}:{options.height},setsar=1",
+                target,
+            ],
+            timeout=30,
+        )
+        with Image.open(target) as source:
+            return source.convert("RGB")
+
+
+def cover_picture(project: Project, config: dict) -> Image.Image:
+    options = VideoOptions.model_validate(config["options"])
+    cover = CoverOptions.model_validate(config["cover"]["options"])
+    if cover.background == "image":
+        if not config["cover"]["image"]:
+            raise ValueError("请先上传封面底图")
+        with Image.open(asset_path(project, config["cover"]["image"])) as source:
+            image = ImageOps.fit(
+                ImageOps.exif_transpose(source).convert("RGB"),
+                (options.width, options.height),
+                Image.Resampling.LANCZOS,
+            )
+    else:
+        image = background_frame(project, config, cover.frame_second)
+    image = image.convert("RGBA")
+    if cover.shade:
+        image.alpha_composite(Image.new("RGBA", image.size, (0, 0, 0, round(255 * cover.shade))))
+    if cover.show_overlays:
+        timeline = video_timeline(project) if has_speaking_glow(config) else {"lines": []}
+        for layer in config["overlays"]:
+            if layer["start"] <= cover.frame_second and (
+                layer["end"] is None or cover.frame_second < layer["end"]
+            ):
+                sticker, x, y = overlay_image(project, layer, options)
+                amount = glow_opacity(cover.frame_second, speaking_intervals(timeline, layer))
+                if amount > 0 and layer["glow_strength"] > 0:
+                    glow, pad = glow_image(
+                        sticker,
+                        SUBTITLE_COLORS[layer["speaker_slot"]],
+                        layer["glow_strength"] * amount,
+                    )
+                    image.alpha_composite(glow, (x - pad, y - pad))
+                image.alpha_composite(sticker, (x, y))
+    draw = ImageDraw.Draw(image)
+    size = max(12, round(cover.font_size * options.width / 1080))
+    margin = round(options.width * 0.07)
+    y = round(options.height * cover.title_y)
+    bottom_margin = round(options.height * 0.03)
+    available = options.height - y - bottom_margin
+    # Shrink long titles to keep all text inside the frame at every aspect ratio.
+    while True:
+        face, subface = font(size), font(max(5, round(size * 0.48)))
+        title = subtitle_lines(draw, cover.title, face, options.width - 2 * margin)
+        subtitle = subtitle_lines(draw, cover.subtitle, subface, options.width - 2 * margin)
+        line_height, subheight = round(size * 1.35), round(size * 0.7)
+        gap = round(size * 0.4) if title and subtitle else 0
+        total = len(title) * line_height + len(subtitle) * subheight + gap
+        if total <= available or size <= 6:
+            break
+        size -= 1
+    y = min(y, max(0, options.height - total - bottom_margin))
+    for lines, face, step in [(title, face, line_height), (subtitle, subface, subheight)]:
+        for line in lines:
+            box = draw.textbbox((0, 0), line, font=face)
+            x = (options.width - draw.textlength(line, font=face)) / 2
+            draw.text(
+                (x, y - box[1]),
+                line,
+                font=face,
+                fill=cover.color,
+                stroke_width=max(1, round(size / 22)),
+                stroke_fill=(0, 0, 0, 220),
+            )
+            y += step
+        if lines is title:
+            y += gap
+    return image.convert("RGB")
+
+
+def cover_signature(project: Project, config: dict | None = None) -> str:
+    config = config or video_config(project)
+    cover = config["cover"]
+    data = {
+        "version": 1,
+        "size": [config["options"]["width"], config["options"]["height"]],
+        "image_seconds": config["options"]["image_seconds"],
+        "options": cover["options"],
+        "image": sha256(asset_path(project, cover["image"])) if cover["image"] else None,
+        "assets": [(a["id"], sha256(asset_path(project, a))) for a in config["assets"]],
+        "overlays": [
+            {**render_layer(a), "sha256": sha256(asset_path(project, a))}
+            for a in config["overlays"]
+        ],
+        "audio_duration": read_json(project.root / "exports/audio.json", {}).get("duration"),
+    }
+    if has_speaking_glow(config):
+        data["timeline"] = video_timeline(project)
+        data["glow_version"] = 1
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
+
+def cover_current(project: Project) -> bool:
+    try:
+        meta = read_json(project.root / "exports/cover.json", {})
+        return bool(
+            meta
+            and meta["signature"] == cover_signature(project)
+            and all(
+                sha256(project.root / "exports" / f["path"]) == f["sha256"]
+                for f in meta["files"].values()
+            )
+        )
+    except (OSError, ValueError, KeyError):
+        return False
+
+
+def render_cover(
+    project: Project, cancelled=lambda: False, progress=lambda **kw: None, already_locked=False
+) -> dict:
+    with nullcontext() if already_locked else lock(project.root / ".project.lock"):
+        if cancelled():
+            raise VideoPaused("已暂停封面导出")
+        config = video_config(project)
+        signature = cover_signature(project, config)
+        if cover_current(project):
+            return read_json(project.root / "exports/cover.json")
+        progress(stage="正在生成封面图片", kind="stage")
+        image = cover_picture(project, config)
+        folder = project.root / "exports/cover" / (signature[:20] + "-" + uuid.uuid4().hex[:8])
+        folder.mkdir(parents=True)
+        try:
+            image.save(folder / "cover.png")
+            image.save(folder / "cover.jpg", quality=95)
+            if cancelled():
+                raise VideoPaused("已暂停封面导出")
+            meta = {
+                "signature": signature,
+                "files": {
+                    name: {
+                        "path": (folder / name).relative_to(project.root / "exports").as_posix(),
+                        "sha256": sha256(folder / name),
+                        "bytes": (folder / name).stat().st_size,
+                    }
+                    for name in ("cover.png", "cover.jpg")
+                },
+            }
+            write_json(project.root / "exports/cover.json", meta)
+            return meta
+        except Exception:
+            shutil.rmtree(folder)
+            raise
 
 
 def subtitle_lines(draw: ImageDraw.ImageDraw, text: str, face, width: int) -> list[str]:
@@ -283,6 +619,8 @@ def render_video(project: Project, cancelled=lambda: False, progress=lambda **kw
         options = VideoOptions.model_validate(config["options"])
         signature = video_signature(project, config)
         if video_current(project):
+            if config["cover"]["options"]["enabled"]:
+                render_cover(project, cancelled, progress, already_locked=True)
             return read_json(project.root / "exports/video.json")
         audio = read_json(project.root / "exports/audio.json")
         duration = audio["duration"]
@@ -354,24 +692,65 @@ def render_video(project: Project, cancelled=lambda: False, progress=lambda **kw
             subtitles = project.root / "exports" / audio["files"]["subtitles.srt"]["path"]
             timeline = read_json(project.root / "exports" / audio["files"]["timeline.json"]["path"])
             inputs += ["-i", master]
+            filters, current_stream, input_index = [], "0:v", 2
+            for i, layer in enumerate(config["overlays"]):
+                checkpoint()
+                sticker, x, y = overlay_image(project, layer, options)
+                intervals = speaking_intervals(timeline, layer)
+                if intervals and layer["glow_strength"] > 0:
+                    progress(stage=f"正在生成发言高光：{layer['name']}", kind="stage")
+                    glow, pad = glow_image(
+                        sticker, SUBTITLE_COLORS[layer["speaker_slot"]], layer["glow_strength"]
+                    )
+                    track = glow_track(
+                        glow, intervals, work, f"glow-{i:02}", options.fps, duration, checkpoint
+                    )
+                    inputs += ["-i", track]
+                    output = f"glow{i}"
+                    filters.append(
+                        f"[{current_stream}][{input_index}:v]overlay={x - pad}:{y - pad}:"
+                        f"eof_action=pass[{output}]"
+                    )
+                    current_stream = output
+                    input_index += 1
+                sticker_path = work / f"overlay-{i:02}.png"
+                sticker.save(sticker_path)
+                inputs += ["-loop", "1", "-i", sticker_path]
+                enabled = f"gte(t,{layer['start']})"
+                if layer["end"] is not None:
+                    enabled += f"*lt(t,{layer['end']})"
+                output = f"layer{i}"
+                filters.append(
+                    f"[{current_stream}][{input_index}:v]overlay={x}:{y}:"
+                    f"enable='{enabled}':eof_action=repeat[{output}]"
+                )
+                current_stream = output
+                input_index += 1
             if options.burn_subtitles:
                 progress(stage="正在生成按台词时间线对齐的字幕图层", kind="stage")
                 checkpoint()
                 track = subtitle_track(timeline, work, options, duration, checkpoint)
                 inputs += ["-i", track, "-i", subtitles]
-                mapping = [
-                    "-filter_complex",
-                    "[0:v][2:v]overlay=0:H-h:eof_action=pass[v]",
-                    "-map",
-                    "[v]",
-                    "-map",
-                    "1:a:0",
-                    "-map",
-                    "3:0",
-                ]
+                filters.append(
+                    f"[{current_stream}][{input_index}:v]overlay=0:H-h:eof_action=pass[v]"
+                )
+                current_stream = "v"
+                input_index += 1
             else:
                 inputs += ["-i", subtitles]
-                mapping = ["-map", "0:v:0", "-map", "1:a:0", "-map", "2:0"]
+            mapping = [
+                *(
+                    ["-filter_complex_threads", "1", "-filter_complex", ";".join(filters)]
+                    if filters
+                    else []
+                ),
+                "-map",
+                f"[{current_stream}]" if filters else "0:v:0",
+                "-map",
+                "1:a:0",
+                "-map",
+                f"{input_index}:0",
+            ]
             progress(stage="正在合成画面、完整音频与字幕", kind="stage")
             checkpoint()
             final = work / "final.mp4"
@@ -451,6 +830,8 @@ def render_video(project: Project, cancelled=lambda: False, progress=lambda **kw
             state = read_json(project.root / "workflow.json", {"approvals": {}})
             state["stage"] = "video_review"
             write_json(project.root / "workflow.json", state)
+            if config["cover"]["options"]["enabled"]:
+                render_cover(project, cancelled, progress, already_locked=True)
             return meta
         finally:
             if work.exists():
