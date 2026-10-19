@@ -37,7 +37,7 @@ cd /path/outside/repo/public-candidate.git
 python /path/to/SpeakVideo/scripts/check_release.py --history
 ```
 
-脚本新建 bare 镜像，保留 main/divide 与标签，删除临时分支和远端跟踪引用，剔除私人数据、旧截图和音视频权重历史，替换文本与提交消息，再移除镜像的 origin。不会重写原工作仓库或执行 push。
+脚本新建 bare 镜像，保留 main/divide 与标签，删除临时分支、远端跟踪引用及应用检查点引用，剔除私人数据、旧截图和音视频权重历史；部署日志类文档仅保留两个分支当前审阅过的版本，旧私人记录从历史移除，替换文本与提交消息，再移除镜像的 origin。不会重写原工作仓库或执行 push。
 
 公开前审阅候选的所有引用、提交映射、源码差异、许可证与恢复步骤。检查历史中的私钥、Token、账号与私有部署内容；实际发现有效凭据须先轮换。准备新的备份 bundle，并保存被替换的远端分支和标签清单。
 
