@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import json
 import threading
@@ -20,13 +19,13 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .audio import audio_current, build_audio
-from .config import Settings, TTSSettings
+from .config import RuntimeSettings, Settings, TTSSettings
 from .connections import connection_status
 from .jobs import SynthesisOptions, group_audio, report, synthesis_options, synthesize
 from .llm_config import public_llm, save_llm
 from .processing import ffmpeg
 from .project import Project
-from .script.engine import LLMCancelled, LLMHooks, OpenAICompatibleProvider
+from .script.engine import LLMCancelled, LLMHooks, OpenAICompatibleProvider, ScriptEngine
 from .script.moods import MOOD_LABELS
 from .script.prompts import default_prompts, global_prompts, save_global_prompts, structure_contract
 from .script.schema import Script, ScriptPrompts, VoiceBinding, validate_ids
@@ -96,7 +95,7 @@ class VoiceAction(BaseModel):
         if self.action == "create":
             import re
 
-            if not re.fullmatch(r"[a-f0-9]{32}\.wav", self.reference_id):
+            if not re.fullmatch("[a-f0-9]{32}\\.wav", self.reference_id):
                 raise ValueError("请提供角色原声")
         return self
 
@@ -109,13 +108,13 @@ class VoiceEdit(BaseModel):
 
 
 class ReferenceCrop(BaseModel):
-    reference_id: str = Field(pattern=r"^[a-f0-9]{32}\.wav$")
+    reference_id: str = Field(pattern="^[a-f0-9]{32}\\.wav$")
     start: float = Field(ge=0, allow_inf_nan=False)
     end: float = Field(gt=0, allow_inf_nan=False)
 
 
 class TTSModeEdit(BaseModel):
-    mode: str = Field(pattern=r"^(gateway|direct)$")
+    mode: str = Field(pattern="^(managed|direct|demo)$")
     local_url: str = "http://127.0.0.1:8001"
 
 
@@ -131,13 +130,15 @@ def create_app(settings: Settings) -> FastAPI:
     tasks: dict[str, dict] = {}
     submission_lock = threading.RLock()
     events: dict[str, threading.Event] = {}
-    # Live LLM output per task (memory only) and the hook that closes its open stream.
     streams: dict[str, dict] = {}
     aborts: dict[str, object] = {}
     llm_runs = settings.paths.cache / "llm-runs"
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="speakvideo")
-    remote_inventory_cache = {"at": 0.0, "assets": [], "status": {}}
-    capabilities_cache = {"at": 0.0, "value": {}}
+    runtime_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="speakvideo-runtime")
+    from .inference.manager import RuntimeManager
+
+    runtime_manager = RuntimeManager(settings)
+    app.state.runtime_manager = runtime_manager
     task_context = threading.local()
     voice_previews = VoicePreviews(settings.paths.root)
     voice_previews.migrate(settings.paths.cache)
@@ -158,7 +159,7 @@ def create_app(settings: Settings) -> FastAPI:
         active_groups = len(
             {
                 record.get("group_id", key)
-                for key, record in zip(ids, records)
+                for (key, record) in zip(ids, records)
                 if record.get("status") == "running"
             }
         )
@@ -171,11 +172,13 @@ def create_app(settings: Settings) -> FastAPI:
 
         if item["label"] == "retry":
             valid_ids = {
-                key for key, record in zip(ids, records) if key in valid_ids and fresh(key, record)
+                key
+                for (key, record) in zip(ids, records)
+                if key in valid_ids and fresh(key, record)
             }
         running_ids = [
             key
-            for key, record in zip(ids, records)
+            for (key, record) in zip(ids, records)
             if record.get("status") == "running"
             and (item["label"] != "retry" or fresh(key, record))
         ]
@@ -184,12 +187,12 @@ def create_app(settings: Settings) -> FastAPI:
             "stage": "正在按连续角色分组合成配音",
             "active_groups": active_groups,
             "concurrency": item.get("concurrency", manifest.get("concurrency", 1)),
-            "completed": sum(line_id in valid_ids for line_id in ids),
+            "completed": sum((line_id in valid_ids for line_id in ids)),
             "completed_ids": [key for key in ids if key in valid_ids],
             "total": len(ids),
-            "failed": sum(r.get("status") == "failed" for r in records),
+            "failed": sum((r.get("status") == "failed" for r in records)),
             "current_line": next(
-                (key for key, record in zip(ids, records) if record.get("status") == "running"),
+                (key for (key, record) in zip(ids, records) if record.get("status") == "running"),
                 None,
             ),
             "running_ids": running_ids,
@@ -199,17 +202,7 @@ def create_app(settings: Settings) -> FastAPI:
         return VoiceStore(settings)
 
     def inventory_assets(force=False):
-        store = voice_store()
-        if settings.tts.mode != "gateway":
-            return [{**v, "source": "local", "editable": True} for v in store.details()]
-        if not force and time.monotonic() - remote_inventory_cache["at"] < 3:
-            return remote_inventory_cache["assets"]
-        with TTSClient(settings) as client:
-            assets = store.remote_inventory(client)
-        remote_inventory_cache.update(
-            at=time.monotonic(), assets=assets, status=store.inventory_status
-        )
-        return assets
+        return [{**v, "source": "local", "editable": True} for v in voice_store().details()]
 
     for path in settings.paths.cache.glob("task-*.json"):
         item = read_json(path)
@@ -262,11 +255,10 @@ def create_app(settings: Settings) -> FastAPI:
             live.update(text=text, reasoning=reasoning, version=live["version"] + 1)
             if kind == "generate":
                 live["lines"] = partial_lines(text)
-            # Memory only: the task list shows live counts without rewriting the task file.
             item.setdefault("progress", {})["stage"] = (
                 f"正在生成台词 · 已输出 {len(live['lines'])} 行"
                 if kind == "generate" and text
-                else f"正在{'续写' if kind == 'extend' else '撰写'}草稿 · 已输出 {len(text):,} 字"
+                else f"正在{('续写' if kind == 'extend' else '撰写')}草稿 · 已输出 {len(text):,} 字"
                 if kind in {"brief", "extend"} and text
                 else f"模型思考中 · 已推理 {reasoning:,} 字"
                 if reasoning
@@ -276,8 +268,8 @@ def create_app(settings: Settings) -> FastAPI:
         def on_finish(record: dict):
             atomic_bytes(
                 llm_runs / f"{key}-{live['phase']}.json",
-                (
-                    json.dumps({"task": key, "kind": kind, **record}, ensure_ascii=False, indent=2)
+                json.dumps(
+                    {"task": key, "kind": kind, **record}, ensure_ascii=False, indent=2
                 ).encode(),
             )
             summary = {
@@ -301,8 +293,7 @@ def create_app(settings: Settings) -> FastAPI:
             )
             item["llm"] = summary
             done = (
-                f"模型结束 · finish_reason={record.get('finish_reason') or '无'}"
-                f" · 正文 {summary['content_chars']:,} 字"
+                f"模型结束 · finish_reason={record.get('finish_reason') or '无'} · 正文 {summary['content_chars']:,} 字"
                 + (
                     f" · 推理 {summary['reasoning_chars']:,} 字"
                     if summary["reasoning_chars"]
@@ -335,21 +326,30 @@ def create_app(settings: Settings) -> FastAPI:
         concurrency: int | None = None,
         line_ids: list[str] | None = None,
     ):
-        # One executor owns the project/GPU locks. Retries join its FIFO queue;
-        # batches use the synthesis concurrency window once their turn starts.
         with submission_lock:
             return submit_locked(label, fn, project_name, line_id, concurrency, line_ids)
 
     def submit_locked(label, fn, project_name, line_id, concurrency, line_ids):
+        gpu_labels = {"sync", "create", "design", "preview", "synth", "retry", "run"}
+        if label.startswith("runtime_") or label in gpu_labels:
+            if any(
+                t["status"] in {"queued", "running"}
+                and (
+                    t["label"].startswith("runtime_")
+                    or (label.startswith("runtime_") and t["label"] in gpu_labels)
+                )
+                for t in tasks.values()
+            ):
+                raise HTTPException(409, "运行环境或配音任务正在执行，请等待完成")
         active = [
             t
             for t in tasks.values()
             if project_name
             and t.get("project") == project_name
-            and t["status"] in {"queued", "running"}
+            and (t["status"] in {"queued", "running"})
         ]
         if active and (
-            label != "retry" or any(t["label"] not in {"synth", "retry"} for t in active)
+            label != "retry" or any((t["label"] not in {"synth", "retry"} for t in active))
         ):
             raise HTTPException(409, "工程已有排队/执行中的任务")
         key = uuid.uuid4().hex
@@ -376,15 +376,21 @@ def create_app(settings: Settings) -> FastAPI:
             item["line_ids"] = [
                 line.id
                 for group in speech_groups(script.lines, p.cast())
-                if (label == "synth" or any(member.id in requested for member in group.lines))
-                and not (label == "retry" and any(member.id in occupied for member in group.lines))
+                if (label == "synth" or any((member.id in requested for member in group.lines)))
+                and (
+                    not (
+                        label == "retry" and any((member.id in occupied for member in group.lines))
+                    )
+                )
                 for line in group.lines
             ]
-            if label == "retry" and not item["line_ids"]:
+            if label == "retry" and (not item["line_ids"]):
                 return next(
-                    t
-                    for t in active
-                    if t["label"] == "retry" and requested.intersection(t["line_ids"])
+                    (
+                        t
+                        for t in active
+                        if t["label"] == "retry" and requested.intersection(t["line_ids"])
+                    )
                 )
             item["requested_line_ids"] = sorted(requested)
             manifest = read_json(p.root / "manifest.json", {"lines": {}})
@@ -396,8 +402,8 @@ def create_app(settings: Settings) -> FastAPI:
                 key: manifest.get("lines", {}).get(key, {}).get("fingerprint")
                 for key in item["line_ids"]
             }
-        tasks[key], events[key] = item, threading.Event()
-        for old in [k for k, t in tasks.items() if k in streams and t.get("finished_at")]:
+        (tasks[key], events[key]) = (item, threading.Event())
+        for old in [k for (k, t) in tasks.items() if k in streams and t.get("finished_at")]:
             if time.time() - tasks[old]["finished_at"] > 60:
                 streams.pop(old, None)
 
@@ -428,30 +434,27 @@ def create_app(settings: Settings) -> FastAPI:
             persist()
             try:
                 result = fn(events[key].is_set)
-                # A model result that was already saved counts as done even if stop came late.
                 final_status = (
                     "paused" if events[key].is_set() and label not in LLM_LABELS else "succeeded"
                 )
                 item.update(
-                    result=(
-                        f"已生成视频 · {result['duration']:.1f} 秒"
-                        if label == "render" and isinstance(result, dict)
-                        else f"已交付 {len(result['files'])} 个音频/工程文件"
-                        if isinstance(result, dict) and "files" in result
-                        else f"有效配音 {sum(v.get('status') == 'succeeded' for v in result['lines'].values())} 行（含复用）"
-                        if isinstance(result, dict) and "lines" in result
-                        else f"生成 {len(result.lines)} 行剧本"
-                        if isinstance(result, Script)
-                        else f"草稿已{'扩展' if label == 'extend' else '生成'} · {len(result)} 字"
-                        if label in {"brief", "extend"} and isinstance(result, str)
-                        else {
-                            "script_review": "等待剧本定稿",
-                            "binding_review": "等待确认音色绑定",
-                            "audio_review": "等待试听并确认完整音频",
-                            "segments_review": "语音组已就绪，请整组试听；满意后手动合并完整音频",
-                            "complete": "音频工作流已完成",
-                        }.get(str(result), str(result)[:500])
-                    ),
+                    result=f"已生成视频 · {result['duration']:.1f} 秒"
+                    if label == "render" and isinstance(result, dict)
+                    else f"已交付 {len(result['files'])} 个音频/工程文件"
+                    if isinstance(result, dict) and "files" in result
+                    else f"有效配音 {sum((v.get('status') == 'succeeded' for v in result['lines'].values()))} 行（含复用）"
+                    if isinstance(result, dict) and "lines" in result
+                    else f"生成 {len(result.lines)} 行剧本"
+                    if isinstance(result, Script)
+                    else f"草稿已{('扩展' if label == 'extend' else '生成')} · {len(result)} 字"
+                    if label in {"brief", "extend"} and isinstance(result, str)
+                    else {
+                        "script_review": "等待剧本定稿",
+                        "binding_review": "等待确认音色绑定",
+                        "audio_review": "等待试听并确认完整音频",
+                        "segments_review": "语音组已就绪，请整组试听；满意后手动合并完整音频",
+                        "complete": "音频工作流已完成",
+                    }.get(str(result), str(result)[:500])
                 )
             except Exception as exc:
                 final_status = "paused" if events[key].is_set() else "failed"
@@ -475,7 +478,7 @@ def create_app(settings: Settings) -> FastAPI:
                     streams[key]["version"] += 1
                 persist()
 
-        executor.submit(execute)
+        (runtime_executor if label.startswith("runtime_") else executor).submit(execute)
         return item
 
     @app.get("/api/config")
@@ -489,8 +492,8 @@ def create_app(settings: Settings) -> FastAPI:
             "subtitle_colors": SUBTITLE_COLORS,
             "tts_url": settings.tts.base_url,
             "llm_configured": bool(settings.llm.endpoints()),
-            "voice_source": "Windows 实时音色库"
-            if settings.tts.mode == "gateway"
+            "voice_source": "内置 Qwen 音色库"
+            if settings.tts.mode == "managed"
             else "本机 Qwen PT 目录"
             if settings.tts.mode == "direct"
             else "离线测试音色库",
@@ -508,73 +511,92 @@ def create_app(settings: Settings) -> FastAPI:
     def connections():
         return connection_status(settings)
 
-    @app.get("/api/worker/capabilities")
-    def worker_capabilities(refresh: bool = False):
-        if not refresh and time.monotonic() - capabilities_cache["at"] < 30:
-            return capabilities_cache["value"]
-        bounded = settings.model_copy(deep=True)
-        bounded.tts.timeout_seconds = 12
-        with TTSClient(bounded) as client:
-            value = client.capabilities()
-        capabilities_cache.update(at=time.monotonic(), value=value)
-        return value
-
     @app.post("/api/tts/mode")
     def edit_tts_mode(body: TTSModeEdit):
-        if any(t["status"] in {"queued", "running"} for t in tasks.values()):
-            raise HTTPException(409, "请等待当前任务完成再切换算力模式")
-        path = settings.paths.cache / "tts-mode.json"
-        modes = read_json(path, {})
-        private = settings.tts.model_dump(mode="json")
-        private["api_key"] = settings.tts.api_key.get_secret_value()
-        modes[settings.tts.mode] = private
-        if body.mode == "direct":
-            if urlparse(body.local_url).hostname not in {"127.0.0.1", "localhost", "::1"}:
-                raise ValueError("本地模式地址必须是 localhost / 127.0.0.1")
-            values = {
-                **private,
-                "mode": "direct",
-                "base_url": body.local_url,
-                "api_key": "",
-                "local_pt_root": None,
-            }
-        else:
-            values = modes.get("gateway")
-            if not values:
-                raise ValueError("尚未配置 Windows Gateway，请先设置 config.local.toml")
-        updated = TTSSettings.model_validate(values)
-        modes[body.mode], modes["active"] = values, body.mode
-        write_json(path, modes)
-        path.chmod(0o600)
-        settings.tts = updated
-        remote_inventory_cache["at"] = 0
-        capabilities_cache["at"] = 0
+        with submission_lock, lock(settings.paths.cache / "gpu.lock"):
+            if any(t["status"] in {"queued", "running"} for t in tasks.values()):
+                raise HTTPException(409, "请等待任务完成再切换模式")
+            if runtime_manager.owned_process():
+                raise ValueError("请先停止内置推理服务再切换模式")
+            if body.mode == "direct":
+                address = urlparse(body.local_url)
+                if (
+                    address.scheme not in {"http", "https"}
+                    or address.hostname not in {"localhost", "127.0.0.1", "::1"}
+                    or address.username
+                    or address.password
+                    or address.query
+                    or address.fragment
+                ):
+                    raise ValueError("本机服务必须使用不含凭据或查询参数的 HTTP(S) 回环地址")
+            updated = TTSSettings(
+                mode=body.mode,
+                base_url=body.local_url
+                if body.mode == "direct"
+                else f"http://127.0.0.1:{settings.runtime.port}",
+                local_pt_root=settings.paths.voices if body.mode == "managed" else None,
+            )
+            values = updated.model_dump(mode="json")
+            values["api_key"] = ""
+            path = settings.paths.cache / "tts-mode.json"
+            write_json(path, {"active": body.mode, body.mode: values})
+            path.chmod(0o600)
+            settings.tts = updated
         return configuration()
 
     @app.get("/api/runtime")
     def runtime():
-        status = connection_status(settings)
-        metrics = None
-        metrics_status = "本机 Qwen 模式"
-        if settings.tts.mode == "gateway":
-            metrics_status = "Windows 未连接"
-        if settings.tts.mode == "gateway" and status.get("worker") == "connected":
-            with TTSClient(settings) as client:
-                try:
-                    metrics = client._request("GET", "/v1/worker/metrics", timeout=8).json()
-                    metrics_status = "available"
-                except TTSError as exc:
-                    metrics_status = (
-                        "Gateway 缺少资源监控路由，请升级网关"
-                        if exc.status_code == 404
-                        else str(exc)
-                    )
+        state = runtime_manager.status()
         return {
-            "connection": status,
-            "metrics": metrics,
-            "metrics_status": metrics_status,
+            **state,
+            "connection": connection_status(settings),
+            "metrics": None,
+            "metrics_status": "本机运行环境",
             "tasks": task_list(),
         }
+
+    @app.put("/api/runtime/config")
+    def runtime_config(body: RuntimeSettings):
+        with (
+            submission_lock,
+            lock(settings.paths.cache / "gpu.lock"),
+            lock(runtime_manager.root / "lifecycle.lock"),
+        ):
+            if any(t["status"] in {"queued", "running"} for t in tasks.values()):
+                raise HTTPException(409, "请等待当前任务完成再修改运行配置")
+            return runtime_manager.save_config(body.model_dump())
+
+    def runtime_submit(body, model_action=False):
+        allowed = (
+            {"download", "validate", "remove"}
+            if model_action
+            else {"install", "start", "stop", "restart", "test"}
+        )
+        action = body.get("action")
+        if action not in allowed:
+            raise ValueError("未知运行环境操作")
+        key = body.get("key", settings.runtime.model)
+        if model_action:
+            from .inference.models import model_path
+
+            model_path(settings, key)
+        return submit(
+            "runtime_" + action,
+            lambda cancelled: runtime_manager.action(
+                action,
+                key=key,
+                log=lambda msg: task_log(task_context.item, msg),
+                cancelled=cancelled,
+            ),
+        )
+
+    @app.post("/api/runtime/actions")
+    def runtime_action(body: dict):
+        return runtime_submit(body)
+
+    @app.post("/api/runtime/models/actions")
+    def runtime_model_action(body: dict):
+        return runtime_submit(body, True)
 
     @app.get("/api/llm/config")
     def llm_configuration():
@@ -585,11 +607,12 @@ def create_app(settings: Settings) -> FastAPI:
         try:
             return save_llm(settings, body)
         except ValidationError as exc:
-            # Do not echo credentials from Pydantic's input_value diagnostics.
             raise ValueError(
                 "；".join(
-                    f"{'.'.join(map(str, e['loc']))}: {e['msg']}"
-                    for e in exc.errors(include_input=False)
+                    (
+                        f"{'.'.join(map(str, e['loc']))}: {e['msg']}"
+                        for e in exc.errors(include_input=False)
+                    )
                 )
             ) from None
 
@@ -602,10 +625,42 @@ def create_app(settings: Settings) -> FastAPI:
 
         def execute(cancelled):
             provider = OpenAICompatibleProvider(snapshot, llm_hooks(task_context.item, "test"))
-            answer = provider.complete("你是连接测试助手。", "仅回答：LLM 连接成功。")
+            if body.get("structured"):
+                script = ScriptEngine(provider).structure(
+                    "连接测试", [], "P1 问工作台能否使用，P2 回答已经准备好。只生成两句简短对话。"
+                )
+                answer = f"结构化剧本通过（{len(script.lines)} 行）"
+            else:
+                answer = provider.complete("你是连接测试助手。", "仅回答：LLM 连接成功。")
             return f"{provider.last_endpoint}：{answer}"
 
         return submit("llm_test", execute)
+
+    @app.get("/api/llm/models")
+    def llm_models(provider_id: str):
+        import httpx
+
+        endpoint = next((p for p in settings.llm.providers if p.id == provider_id), None)
+        if endpoint is None:
+            raise ValueError("请先保存供应商配置")
+        token = endpoint.api_keys[0].get_secret_value() if endpoint.api_keys else ""
+        try:
+            with httpx.Client(trust_env=False, timeout=10) as client:
+                result = client.get(
+                    endpoint.base_url.rstrip("/") + "/models",
+                    headers={"Authorization": "Bearer " + token} if token else {},
+                )
+            if result.is_error:
+                raise ValueError(f"模型发现返回 {result.status_code}，可手工填写模型名")
+            return {
+                "models": [
+                    v["id"]
+                    for v in result.json().get("data", [])
+                    if isinstance(v, dict) and isinstance(v.get("id"), str)
+                ]
+            }
+        except (httpx.HTTPError, KeyError, TypeError):
+            raise ValueError("模型列表不可用，请确认地址或手工填写模型名") from None
 
     @app.get("/api/voices")
     def voices():
@@ -617,9 +672,11 @@ def create_app(settings: Settings) -> FastAPI:
 
     def mutable_voice():
         if any(
-            t["status"] in {"queued", "running"}
-            and t["label"] in {"sync", "create", "design", "preview", "synth", "retry", "run"}
-            for t in tasks.values()
+            (
+                t["status"] in {"queued", "running"}
+                and t["label"] in {"sync", "create", "design", "preview", "synth", "retry", "run"}
+                for t in tasks.values()
+            )
         ):
             raise HTTPException(409, "配音或音色任务运行中，请完成或暂停后再编辑音色")
 
@@ -630,8 +687,6 @@ def create_app(settings: Settings) -> FastAPI:
     @app.get("/api/voices/status")
     def voice_status():
         inventory_assets()
-        if settings.tts.mode == "gateway":
-            return remote_inventory_cache["status"]
         return {"editable": True, "source": "local", "message": "本机音色管理已连接"}
 
     @app.post("/api/voices/import")
@@ -649,20 +704,6 @@ def create_app(settings: Settings) -> FastAPI:
         content = await file.read(32 * 1024 * 1024 + 1)
         with lock(settings.paths.cache / "gpu.lock"):
             store = voice_store()
-            if settings.tts.mode == "gateway":
-                store.validate_pt(content)
-                with TTSClient(settings) as client:
-                    result = client.manage_voices(
-                        "import",
-                        role=role,
-                        emotion=emotion,
-                        content_base64=base64.b64encode(content).decode(),
-                        overwrite=overwrite,
-                        ref_text=ref_text or "",
-                        notes=notes or "",
-                    )
-                inventory_assets(True)
-                return {**result, **voice_detail(result["role"], result["emotion"])}
             return store.import_pt(role, emotion, content, overwrite, ref_text, notes)
 
     @app.get("/api/voices/assets/{role}/{emotion}")
@@ -685,23 +726,6 @@ def create_app(settings: Settings) -> FastAPI:
         mutable_voice()
         with lock(settings.paths.cache / "gpu.lock"):
             store = voice_store()
-            if settings.tts.mode == "gateway":
-                asset = voice_detail(role, emotion)
-                if (role, emotion) != (body.role, body.emotion) and asset["usage"]:
-                    raise RuntimeError("该 PT 被工程使用，请先解除绑定再重命名")
-                with TTSClient(settings) as client:
-                    result = client.manage_voices(
-                        "edit",
-                        role=role,
-                        emotion=emotion,
-                        new_role=body.role,
-                        new_emotion=body.emotion,
-                        ref_text=body.ref_text,
-                        notes=body.notes,
-                        sha256=asset["sha256"],
-                    )
-                inventory_assets(True)
-                return {**result, **voice_detail(result["role"], result["emotion"])}
             result = store.edit(role, emotion, body.role, body.emotion, body.ref_text, body.notes)
             with TTSClient(settings) as client:
                 store.flush_deletions(client)
@@ -712,26 +736,6 @@ def create_app(settings: Settings) -> FastAPI:
         mutable_voice()
         with lock(settings.paths.cache / "gpu.lock"):
             store = voice_store()
-            if settings.tts.mode == "gateway":
-                asset = voice_detail(role, emotion)
-                if asset["usage"] and not detach:
-                    raise RuntimeError("请勾选解绑后再删除")
-                try:
-                    with TTSClient(settings) as client:
-                        result = client.manage_voices(
-                            "delete_permanent", role=role, emotion=emotion, sha256=asset["sha256"]
-                        )
-                except TTSError as exc:
-                    if exc.status_code == 404 or "unknown voice action" in str(exc):
-                        raise RuntimeError(
-                            "Windows Agent 暂不支持永久删除。请同步最新 worker/ 文件并重启 Agent 后重试。"
-                        ) from exc
-                    raise
-                if result.get("deleted") is not True or result.get("permanent") is not True:
-                    raise RuntimeError("Windows 未确认永久删除，请更新 Windows Agent 后重试")
-                local = store.delete(role, emotion, detach, remote_deleted=True)
-                inventory_assets(True)
-                return {**local, **result}
             result = store.delete(role, emotion, detach)
             with TTSClient(settings) as client:
                 items = store.flush_deletions(client)
@@ -744,29 +748,10 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.post("/api/voices/deletions/retry")
     def retry_deletions():
-        def execute(cancelled):
-            with lock(settings.paths.cache / "gpu.lock"), TTSClient(settings) as client:
-                result = VoiceStore(settings).flush_deletions(client)
-                if any(i["status"] == "pending" for i in result):
-                    raise RuntimeError("Windows 删除尚未完成，请检查连接或文件哈希冲突")
-                return "Windows 删除已同步"
-
-        return submit("sync", execute)
+        return submit("sync", lambda cancelled: "本机音色库已更新")
 
     @app.get("/api/voices/assets/{role}/{emotion}/reference")
     def voice_reference(role: str, emotion: str):
-        if settings.tts.mode == "gateway":
-            asset = voice_detail(role, emotion)
-            with TTSClient(settings) as client:
-                result = client.manage_voices(
-                    "reference", role=role, emotion=emotion, sha256=asset["sha256"]
-                )
-            key = uuid.uuid4().hex + ".wav"
-            atomic_bytes(
-                settings.paths.cache / key,
-                base64.b64decode(result["content_base64"], validate=True),
-            )
-            return FileResponse(settings.paths.cache / key, media_type="audio/wav")
         store = voice_store()
         store.detail(role, emotion)
         path = store.path(role, emotion).with_suffix(".wav")
@@ -799,35 +784,42 @@ def create_app(settings: Settings) -> FastAPI:
 
             def has_video(metadata):
                 return any(
-                    has_export(metadata, name)
-                    for name in metadata.get("files", {})
-                    if name.endswith(".mp4")
+                    (
+                        has_export(metadata, name)
+                        for name in metadata.get("files", {})
+                        if name.endswith(".mp4")
+                    )
                 )
 
             if not script.lines:
-                stage, tab = ("草稿待整理" if script.meta.brief.strip() else "从话题开始"), "script"
-            elif not p.approved("script"):
-                stage, tab = "台词待定稿", "script"
-            elif not p.approved("binding"):
-                stage, tab = "待绑定音色", "binding"
-            elif has_video(video):
-                stage, tab = "已有视频", "video"
-            elif has_export(audio, "master.mp3"):
-                stage, tab = "已有完整音频", "production"
-            else:
-                stage, tab = "可以开始配音", "production"
-            updated = max(
-                file.stat().st_mtime
-                for name in (
-                    "script.json",
-                    "cast.json",
-                    "workflow.json",
-                    "media.json",
-                    "video.json",
-                    "exports/audio.json",
-                    "exports/video.json",
+                (stage, tab) = (
+                    "草稿待整理" if script.meta.brief.strip() else "从话题开始",
+                    "script",
                 )
-                if (file := p.root / name).is_file()
+            elif not p.approved("script"):
+                (stage, tab) = ("台词待定稿", "script")
+            elif not p.approved("binding"):
+                (stage, tab) = ("待绑定音色", "binding")
+            elif has_video(video):
+                (stage, tab) = ("已有视频", "video")
+            elif has_export(audio, "master.mp3"):
+                (stage, tab) = ("已有完整音频", "production")
+            else:
+                (stage, tab) = ("可以开始配音", "production")
+            updated = max(
+                (
+                    file.stat().st_mtime
+                    for name in (
+                        "script.json",
+                        "cast.json",
+                        "workflow.json",
+                        "media.json",
+                        "video.json",
+                        "exports/audio.json",
+                        "exports/video.json",
+                    )
+                    if (file := (p.root / name)).is_file()
+                )
             )
             summaries.append(
                 {
@@ -856,11 +848,10 @@ def create_app(settings: Settings) -> FastAPI:
         groups = speech_groups(p.script().lines, p.cast())
         audio = {}
         for group in groups:
-            if all(line.id in checks["reusable_ids"] for line in group.lines):
+            if all((line.id in checks["reusable_ids"] for line in group.lines)):
                 try:
                     content = group_audio(p, group, p.cast(), manifest)
                 except (OSError, KeyError, ValueError, TTSError):
-                    # Generation may publish a newer version between the two snapshots.
                     continue
                 audio[group.id] = {
                     "sha256": hashlib.sha256(content).hexdigest(),
@@ -878,7 +869,7 @@ def create_app(settings: Settings) -> FastAPI:
             ],
             "group_audio": audio,
             "script": p.script().model_dump(),
-            "cast": {k: v.model_dump() for k, v in p.cast().items()},
+            "cast": {k: v.model_dump() for (k, v) in p.cast().items()},
             "workflow": {
                 **workflow,
                 "approvals": {
@@ -907,7 +898,7 @@ def create_app(settings: Settings) -> FastAPI:
             (
                 group
                 for group in speech_groups(p.script().lines, p.cast())
-                if any(line.id == line_id for line in group.lines)
+                if any((line.id == line_id for line in group.lines))
             ),
             None,
         )
@@ -934,8 +925,10 @@ def create_app(settings: Settings) -> FastAPI:
     def edit_project(name: str, body: Edit):
         p = project(name)
         if any(
-            t.get("project") == name and t["status"] in {"running", "queued"}
-            for t in tasks.values()
+            (
+                t.get("project") == name and t["status"] in {"running", "queued"}
+                for t in tasks.values()
+            )
         ):
             raise HTTPException(409, "任务运行中，请先暂停再编辑")
         problems = validate_ids(body.script)
@@ -994,11 +987,11 @@ def create_app(settings: Settings) -> FastAPI:
         }
         if body.action not in actions:
             raise ValueError("未知操作")
-        if body.action == "retry" and not (body.line_id or body.line_ids):
+        if body.action == "retry" and (not (body.line_id or body.line_ids)):
             raise ValueError("请指定重试行")
-        if body.action == "extend" and not p.script().meta.brief.strip():
+        if body.action == "extend" and (not p.script().meta.brief.strip()):
             raise ValueError("请先填写或生成草稿，再扩展对话")
-        if body.action == "render" and not audio_current(p):
+        if body.action == "render" and (not audio_current(p)):
             raise ValueError("请先合并导出与当前工程一致的完整音频")
         return submit(
             body.action,
@@ -1019,8 +1012,10 @@ def create_app(settings: Settings) -> FastAPI:
 
     def mutable_project(name):
         if any(
-            t.get("project") == name and t["status"] in {"queued", "running"}
-            for t in tasks.values()
+            (
+                t.get("project") == name and t["status"] in {"queued", "running"}
+                for t in tasks.values()
+            )
         ):
             raise HTTPException(409, "任务运行中，请完成或暂停后再修改素材")
 
@@ -1076,7 +1071,7 @@ def create_app(settings: Settings) -> FastAPI:
         try:
             size = 0
             with target.open("wb") as f:
-                while chunk := await file.read(1024 * 1024):
+                while chunk := (await file.read(1024 * 1024)):
                     size += len(chunk)
                     limit = 32 if kind in {"overlay", "cover"} else 500 if kind == "bgm" else None
                     if limit is not None and size > limit * 1024 * 1024:
@@ -1106,7 +1101,6 @@ def create_app(settings: Settings) -> FastAPI:
                         placement = OverlayEdit(
                             id=asset["id"], x=0.05 if len(config["overlays"]) % 2 == 0 else 0.55
                         )
-                        # Width is a normalized placement value; preserve source dimensions separately.
                         asset["source_width"] = asset.pop("width")
                         asset["source_height"] = asset.pop("height")
                         config["overlays"].append({**asset, **placement.model_dump()})
@@ -1229,13 +1223,12 @@ def create_app(settings: Settings) -> FastAPI:
         if not content:
             raise ValueError("角色原声为空")
         stem = uuid.uuid4().hex
-        source, target = (
+        (source, target) = (
             settings.paths.cache / (stem + ".upload" + suffix),
             settings.paths.cache / (stem + ".wav"),
         )
         atomic_bytes(source, content)
         try:
-            # Uploaded audio and PCM recordings share one normalized Qwen input format.
             await run_in_threadpool(
                 ffmpeg,
                 [
@@ -1256,7 +1249,7 @@ def create_app(settings: Settings) -> FastAPI:
                 ],
                 timeout=60,
             )
-            _, duration = wav_info(target.read_bytes())
+            (_, duration) = wav_info(target.read_bytes())
             if duration > 120:
                 raise ValueError("角色原声请控制在 120 秒以内")
         except Exception:
@@ -1272,12 +1265,10 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.post("/api/voices/actions")
     def voice_action(body: VoiceAction):
+
         def execute(cancelled):
             with lock(settings.paths.cache / "gpu.lock"), TTSClient(settings) as client:
                 if body.action == "sync":
-                    if client.mode == "gateway":
-                        inventory_assets(True)
-                        return "已刷新 Windows 真实 PT 库；不向远端覆盖 Mac 音色"
                     inventory_assets()
                     return "已刷新本机 Qwen 实际 PT 目录"
                 if body.action == "design":
@@ -1297,24 +1288,7 @@ def create_app(settings: Settings) -> FastAPI:
                     store = VoiceStore(settings)
                     store.detail(body.role, body.emotion)
                     store.verify_remote(client, {(body.role, body.emotion)})
-                    if client.mode == "gateway":
-                        from .storage import sha256
-
-                        job = client.submit(
-                            {
-                                "text": body.text,
-                                "role": body.role,
-                                "emotion": body.emotion,
-                                "language": "Chinese",
-                                "voice_sha256": sha256(store.path(body.role, body.emotion)),
-                            },
-                            "preview-" + uuid.uuid4().hex,
-                        )
-                        result = client.wait_job(job, cancelled)
-                    else:
-                        result = client.synthesize(
-                            text=body.text, role=body.role, emotion=body.emotion
-                        )
+                    result = client.synthesize(text=body.text, role=body.role, emotion=body.emotion)
                     from .storage import sha256
 
                     entry = voice_previews.save(
@@ -1327,17 +1301,16 @@ def create_app(settings: Settings) -> FastAPI:
                     )
                     return entry["id"] + ".wav"
                 if body.action == "create":
-                    # Only use a previously uploaded/generated reference, never arbitrary local paths.
                     ref = Path(body.reference_id)
                     if (
                         ref.suffix != ".wav"
                         or len(ref.stem) != 32
-                        or any(c not in "0123456789abcdef" for c in ref.stem)
-                        or not (settings.paths.cache / ref).is_file()
+                        or any((c not in "0123456789abcdef" for c in ref.stem))
+                        or (not (settings.paths.cache / ref).is_file())
                     ):
                         raise ValueError("角色原声不存在")
                     preview = read_json(settings.paths.cache / (ref.name + ".json"))
-                    if preview and "text" in preview and preview["text"] != body.text:
+                    if preview and "text" in preview and (preview["text"] != body.text):
                         raise ValueError("对应台词必须与试音台词一致")
                     result = voice_store().create(
                         client,
@@ -1354,8 +1327,6 @@ def create_app(settings: Settings) -> FastAPI:
                         emotion=body.emotion,
                         text=body.text,
                     )
-                    if settings.tts.mode == "gateway":
-                        inventory_assets(True)
                     return result
                 raise ValueError("未知音色操作")
 
@@ -1369,8 +1340,8 @@ def create_app(settings: Settings) -> FastAPI:
         key = uuid.uuid4().hex + ".wav"
         target = settings.paths.cache / key
         with wave.open(str(source), "rb") as reader:
-            rate, total = reader.getframerate(), reader.getnframes()
-            first, last = round(body.start * rate), round(body.end * rate)
+            (rate, total) = (reader.getframerate(), reader.getnframes())
+            (first, last) = (round(body.start * rate), round(body.end * rate))
             if last > total or last - first < round(rate * 0.1):
                 raise ValueError("裁剪范围必须在音频内，且至少保留 0.1 秒")
             reader.setpos(first)
@@ -1379,11 +1350,7 @@ def create_app(settings: Settings) -> FastAPI:
                 writer.writeframes(reader.readframes(last - first))
         write_json(
             settings.paths.cache / (key + ".json"),
-            {
-                "source_id": body.reference_id,
-                "start": first / rate,
-                "end": last / rate,
-            },
+            {"source_id": body.reference_id, "start": first / rate, "end": last / rate},
         )
         return {
             "reference_id": key,
@@ -1397,13 +1364,11 @@ def create_app(settings: Settings) -> FastAPI:
         recent = list(tasks.values())
         for task in [
             t
-            for i, t in enumerate(recent)
+            for (i, t) in enumerate(recent)
             if i >= len(recent) - 30 or t["status"] in {"queued", "running"}
         ]:
             item = dict(task)
-            # True while a model call of this task is open and can be followed live.
             item["streaming"] = task["id"] in aborts
-            # Older task records stored no timing or stage; avoid invented line counts.
             if "started_at" in task:
                 item["elapsed_seconds"] = max(
                     0, (task.get("finished_at") or time.time()) - task["started_at"]
@@ -1436,14 +1401,14 @@ def create_app(settings: Settings) -> FastAPI:
             raise HTTPException(404, "当前服务没有该任务")
 
         async def events_source():
-            phase, sent, version = None, 0, -1
+            (phase, sent, version) = (None, 0, -1)
             yield "retry: 1500\n\n"
             while True:
-                task, live = tasks[key], streams.get(key)
+                (task, live) = (tasks[key], streams.get(key))
                 if live and live["version"] != version:
                     version = live["version"]
                     if live["phase"] != phase:
-                        phase, sent = live["phase"], 0
+                        (phase, sent) = (live["phase"], 0)
                     body = {
                         "kind": live["kind"],
                         "phase": phase,
@@ -1457,7 +1422,7 @@ def create_app(settings: Settings) -> FastAPI:
                     else:
                         body["text"] = live["text"][sent:]
                         sent = len(live["text"])
-                    yield "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"
+                    yield ("data: " + json.dumps(body, ensure_ascii=False) + "\n\n")
                 if task["status"] not in {"queued", "running"}:
                     yield (
                         "event: end\ndata: "

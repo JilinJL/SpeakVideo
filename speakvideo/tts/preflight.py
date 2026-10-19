@@ -29,7 +29,7 @@ def preflight(
     done_ids: set[str] | None = None,
     check_remote: bool = True,
 ) -> PreflightReport:
-    errors, warnings = validate_ids(script), []
+    (errors, warnings) = (validate_ids(script), [])
     local = VoiceStore(client.settings).list_roles()
     if not script.lines:
         errors.append("剧本没有台词")
@@ -37,15 +37,9 @@ def preflight(
     if check_remote and client.mode == "direct":
         try:
             remote = client.list_roles()
-            available = {r: sorted(set(es) & set(remote.get(r, []))) for r, es in local.items()}
+            available = {r: sorted(set(es) & set(remote.get(r, []))) for (r, es) in local.items()}
         except Exception as exc:
             errors.append(f"无法读取服务音色: {exc}")
-    elif check_remote and client.mode == "gateway":
-        try:
-            if not client.health().get("ready"):
-                errors.append("网关执行器尚未就绪")
-        except Exception as exc:
-            errors.append(f"网关不可用: {exc}")
     if client.mode == "demo":
         warnings.append("测试模式：输出正弦测试音，不是真实配音")
     summary = {}
@@ -55,7 +49,7 @@ def preflight(
             errors.append(f"槽位 {member.slot} 未绑定角色")
             continue
         if binding.role not in available:
-            errors.append(f"{member.slot} 角色 {binding.role} 无本地音色或远端不可用")
+            errors.append(f"{member.slot} 角色 {binding.role} 无可用本机音色")
         summary[member.slot] = binding.role
     for line in script.lines:
         if len(line.words) > max_line_chars:
@@ -66,15 +60,14 @@ def preflight(
         emotion = binding.mood_map.get(line.mood)
         if not emotion:
             errors.append(
-                f"{line.id} 需要 {line.slot} 的 {line.mood}，mood_map 未映射；"
-                f"{binding.role} 情感: {local.get(binding.role, [])}"
+                f"{line.id} 需要 {line.slot} 的 {line.mood}，mood_map 未映射；{binding.role} 情感: {local.get(binding.role, [])}"
             )
         elif emotion not in available.get(binding.role, []):
-            errors.append(f"{line.id} 音色 {binding.role}/{emotion} 不存在或尚未同步")
+            errors.append(f"{line.id} 音色 {binding.role}/{emotion} 不存在，请检查音色库")
     return PreflightReport(
         errors,
         warnings,
         len(script.lines),
-        sum(line.id in (done_ids or set()) for line in script.lines),
+        sum((line.id in (done_ids or set()) for line in script.lines)),
         summary,
     )

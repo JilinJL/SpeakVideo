@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SpeakVideo 音频工作台</title>
-<meta name="description" content="SpeakVideo 音频工作台：把两个人的对话写成台词，绑定音色，生成配音并混成完整音频。">
-<meta name="application-name" content="SpeakVideo 音频工作台">
+<title>SpeakVideo 对话视频工作台</title>
+<meta name="description" content="SpeakVideo 对话视频工作台：把两个人的对话写成台词，绑定音色，生成配音并混成完整音频。">
+<meta name="application-name" content="SpeakVideo 对话视频工作台">
 <meta name="apple-mobile-web-app-title" content="SpeakVideo">
 <meta name="theme-color" content="#f1f2f4">
 <meta name="color-scheme" content="light">
@@ -13,14 +13,14 @@
 <meta property="og:type" content="website">
 <meta property="og:locale" content="zh_CN">
 <meta property="og:site_name" content="SpeakVideo">
-<meta property="og:title" content="SpeakVideo 音频工作台">
+<meta property="og:title" content="SpeakVideo 对话视频工作台">
 <meta property="og:description" content="把两个人的对话写成台词，绑定音色，生成配音并混成完整音频。">
 <meta property="og:image" content="/brand/icon-512.png">
 <link rel="icon" href="/favicon.ico" sizes="48x48">
 <link rel="icon" href="/brand/logo-small.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
 <link rel="manifest" href="/manifest.json">
-<link rel="stylesheet" href="/style.css?v=20261019-video-slim">
+<link rel="stylesheet" href="/style.css?v=20261019-standalone2">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -88,6 +88,7 @@
 
     <div class="side-foot">
       <button id="openConnections" class="foot-row" title="连接状态"><svg class="ico" aria-hidden="true"><use href="#i-link"/></svg><span id="mode" class="foot-label">连接</span><span id="connectionDot" class="foot-state">检测中</span></button>
+      <button id="openRuntime" class="foot-row" title="本机模型与运行环境"><svg class="ico" aria-hidden="true"><use href="#i-cpu"/></svg><span class="foot-label">本机模型</span><span id="runtimeBadge" class="foot-state">待设置</span></button>
       <button id="openLLM" class="foot-row" title="LLM 配置"><svg class="ico" aria-hidden="true"><use href="#i-cpu"/></svg><span class="foot-label">LLM 配置</span><span id="llmLabel" class="foot-state"></span></button>
       <button id="showTerminal" class="foot-row" title="显示或隐藏终端（⌘J）" aria-pressed="true"><svg class="ico" aria-hidden="true"><use href="#i-terminal"/></svg><span class="foot-label">终端</span><span id="terminalState" class="foot-state"></span></button>
       <div class="side-links">
@@ -138,7 +139,7 @@
           <div id="homeProjects" class="home-project-list" aria-live="polite"><div class="home-empty">正在读取本机工程…</div></div>
         </section>
         <div class="home-footer"><p><span class="home-local-dot"></span>工程保存在本机，随时继续创作。</p><button id="homeVoices" class="btn ghost sm"><svg class="ico" aria-hidden="true"><use href="#i-voice"/></svg>管理音色</button></div>
-        <div id="homeSetup" class="home-setup" hidden><p>开始生成前，先连接一个语言模型。</p><button id="homeLLM" class="btn ghost sm">配置模型 →</button></div>
+        <div id="homeSetup" class="home-setup" hidden><p>可配置语言模型辅助创作，也可以手写或导入剧本。</p><button id="homeLLM" class="btn ghost sm">配置模型 →</button></div>
       </div>
     </section>
 
@@ -466,21 +467,47 @@
   <div class="dialog-head"><h2>LLM 配置</h2><button id="closeLLM" class="icon-btn" aria-label="关闭 LLM 配置"><svg class="ico" aria-hidden="true"><use href="#i-x"/></svg></button></div>
   <div class="dialog-body">
   <p class="hint">支持 OpenAI 兼容接口。每个供应商可配置多个 Key，认证失败、限流或临时故障时依次尝试下一 Key。Key 保存到本机私有配置，页面不会回显。</p>
+  <div class="row"><label class="field">快速添加<select id="llmPreset"><option value="cloud">云端兼容接口</option><option value="ollama">Ollama · 本机</option><option value="lmstudio">LM Studio · 本机</option><option value="vllm">vLLM / 自定义服务</option></select></label><button id="discoverLLMModels" class="btn">保存并发现默认模型</button></div><div id="llmModelChoices" class="row"></div>
   <div id="llmProviders"></div>
   <div class="row"><button id="addLLMProvider" class="btn"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg>添加供应商</button><label class="check"><input id="llmFailover" type="checkbox">允许切换到其他已启用供应商</label></div>
   <p id="llmTestState" class="ref-state" aria-live="polite"></p>
   </div>
-  <div class="dialog-foot"><button id="testLLM" class="btn">保存并测试默认模型</button><button id="saveLLM" class="btn primary">保存配置</button></div>
+  <div class="dialog-foot"><button id="testLLMStructured" class="btn">保存并测试 JSON</button><button id="testLLM" class="btn">保存并测试默认模型</button><button id="saveLLM" class="btn primary">保存配置</button></div>
 </dialog>
 
 <dialog id="connectionDialog" class="dialog wide">
   <div class="dialog-head"><h2>连接状态</h2><button id="closeConnections" class="icon-btn" aria-label="关闭连接状态"><svg class="ico" aria-hidden="true"><use href="#i-x"/></svg></button></div>
   <div class="dialog-body">
   <div id="connectionDetails" class="connection-details"></div>
-  <div class="grid-2"><label class="field">算力与音色来源<select id="ttsMode"><option value="gateway">远端 Windows（真实远端 PT 库）</option><option value="direct">本机 Qwen（真实本机 PT 库）</option></select></label><label class="field">本机 Qwen 地址<input id="localQwenURL" value="http://127.0.0.1:8001"></label></div>
+  <div class="grid-2"><label class="field">算力与音色来源<select id="ttsMode"><option value="managed">内置托管（自动管理本机模型）</option><option value="direct">连接已有本机 Qwen</option><option value="demo">演示（测试音）</option></select></label><label class="field">本机 Qwen 地址<input id="localQwenURL" value="http://127.0.0.1:8001"></label></div>
   <div class="row"><button id="saveTTSMode" class="btn">切换模式</button></div>
   </div>
   <div class="dialog-foot"><button id="checkConnections" class="btn primary">重新检测连接</button></div>
+</dialog>
+<dialog id="runtimeDialog" class="dialog wide">
+  <div class="dialog-head"><h2>本机模型与运行环境</h2><button id="closeRuntime" class="icon-btn" aria-label="关闭运行环境">×</button></div>
+  <div class="dialog-body">
+    <p class="hint">首次使用：检查设备 → 保存配置 → 安装环境 → 下载 Base → 启动服务 → 在音色库上传原声并克隆 → 真实试音。首次下载需要联网，准备完成后可离线运行。</p>
+    <p id="runtimeSummary" role="status" aria-live="polite">正在检测…</p>
+    <div id="runtimeEnvironment" class="runtime-environment"></div>
+    <form id="runtimeForm">
+    <div class="grid-2">
+      <label class="field">Base 模型<select id="runtimeModel"><option value="base-small">0.6B · 较低内存占用</option><option value="base">1.7B · 更高资源需求</option></select></label>
+      <label class="field">设备<input id="runtimeDevice" value="auto" placeholder="auto / mps / cuda:0" required pattern="auto|mps|cuda(:[0-9]+)?"></label>
+      <label class="field">下载来源<select id="runtimeSource"><option value="huggingface">官方 Hugging Face</option><option value="modelscope">ModelScope</option></select></label>
+      <label class="field">推理端口<input id="runtimePort" type="number" min="1024" max="65535" value="8001" required></label>
+    </div>
+    <label class="field">模型父目录（留空使用项目 models/）<input id="runtimeModelsDir" placeholder="目录下应包含 Qwen3-TTS-12Hz-… 模型文件夹"></label>
+    <label class="check"><input id="runtimeOffline" type="checkbox">离线模式（不下载缺失文件）</label>
+    <p class="hint">修改配置前先停止服务。0.6B 与 1.7B 音色不通用，切换后需重新克隆。外部模型目录不会被删除。</p>
+    <button id="saveRuntime" type="submit" class="btn">保存运行配置</button>
+    </form>
+    <div class="row runtime-actions"><button class="btn" data-runtime-action="install">安装 / 修复环境</button><button class="btn primary" data-runtime-action="start">启动服务</button><button class="btn" data-runtime-action="stop">停止服务</button><button class="btn" data-runtime-action="restart">重启</button><button class="btn" data-runtime-action="test">真实试音</button></div>
+    <div id="runtimeModels" class="runtime-models"></div>
+    <h3>安装与服务日志</h3><pre id="runtimeLogs" class="runtime-logs" aria-live="polite"></pre>
+    <div id="runtimePreview"></div>
+  </div>
+  <div class="dialog-foot"><button id="runtimeNextLLM" class="btn">配置语言模型</button><button id="refreshRuntimePanel" class="btn">重新检测</button></div>
 </dialog>
 <!-- 脚本提示词：一次只编辑一份，取消可整体撤回 -->
 <dialog id="promptDialog" class="dialog prompt-dialog">
@@ -528,8 +555,9 @@
 
 <script src="/reference-editor.js?v=20261014-source"></script>
 <script src="/dialogue-timing.js?v=20261014"></script>
-<script src="/video-design.js?v=20261019-video-slim"></script>
-<script src="/app.js?v=20261019-video-slim"></script>
-<script src="/video-editor.js?v=20261019-video-slim"></script>
+<script src="/video-design.js?v=20261019-standalone2"></script>
+<script src="/app.js?v=20261019-standalone2"></script>
+<script src="/runtime.js?v=20261019-standalone2"></script>
+<script src="/video-editor.js?v=20261019-standalone2"></script>
 </body>
 </html>

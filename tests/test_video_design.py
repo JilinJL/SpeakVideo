@@ -64,7 +64,11 @@ def test_alpha_timed_layers_and_cover_only_changes_preserve_video_and_audio(proj
         request["cover"].update(enabled=True, frame_second=1, shade=0, title="")
         assert client.put("/api/projects/test/video", json=request).status_code == 200
         meta = render_video(project)
-        path = project.root / "exports" / next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
+        path = (
+            project.root
+            / "exports"
+            / next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
+        )
         # Transparent corners retain the background; the opaque middle appears only in its interval.
         assert pixel(project, path, 1, 10, 10)[2] > 110
         before = pixel(project, path, 0.1, 90, 90)

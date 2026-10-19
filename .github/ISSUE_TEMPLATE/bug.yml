@@ -1,0 +1,21 @@
+name: Bug report
+description: Include environment and reproduction details.
+title: "[Bug] "
+body:
+  - type: textarea
+    id: environment
+    attributes:
+      label: OS, architecture, GPU, model and branch
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps, expected behavior and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs
+      description: Remove API keys, tokens, personal paths and private recordings.

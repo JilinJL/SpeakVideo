@@ -67,54 +67,6 @@ def test_interrupted_synthesis_only_retries_missing_line(project, monkeypatch):
     assert report(project, False)["reusable"] == 3
 
 
-def test_gateway_poll_resume_does_not_resubmit(project, monkeypatch):
-    with TTSClient(project.settings) as c:
-        audio = c.synthesize(text="test", role="讲述者")
-    assets = VoiceStore(project.settings).assets()
-    project.settings.tts.mode = "gateway"
-    for role, emotion, content in assets:
-        atomic_bytes(VoiceStore(project.settings).path(role, emotion), content)
-    monkeypatch.setattr(VoiceStore, "remote_inventory", lambda self, client: self.details())
-    monkeypatch.setattr(TTSClient, "health", lambda self: {"ready": True})
-    monkeypatch.setattr(VoiceStore, "verify_remote", lambda *args: None)
-    submissions = []
-    monkeypatch.setattr(
-        TTSClient, "submit", lambda self, payload, key: submissions.append(key) or "job1"
-    )
-    monkeypatch.setattr(
-        TTSClient, "wait_job", lambda *args: (_ for _ in ()).throw(TTSError("network timeout"))
-    )
-    with pytest.raises(TTSError):
-        synthesize(project)
-    assert len(submissions) == 1
-    monkeypatch.setattr(TTSClient, "wait_job", lambda *args: audio)
-    synthesize(project)
-    assert len(submissions) == 3  # only L002 and L003 submitted on resume
-    synthesize(project, retry_line="L001")
-    assert len(submissions) == 4  # explicit retry creates a fresh job
-
-
-def test_gateway_lost_submit_ack_reuses_idempotency_key(project, monkeypatch):
-    assets = VoiceStore(project.settings).assets()
-    project.settings.tts.mode = "gateway"
-    for role, emotion, content in assets:
-        atomic_bytes(VoiceStore(project.settings).path(role, emotion), content)
-    monkeypatch.setattr(VoiceStore, "remote_inventory", lambda self, client: self.details())
-    monkeypatch.setattr(TTSClient, "health", lambda self: {"ready": True})
-    monkeypatch.setattr(VoiceStore, "verify_remote", lambda *args: None)
-    keys = []
-
-    def lost(self, payload, key):
-        keys.append(key)
-        raise TTSError("lost acknowledgement")
-
-    monkeypatch.setattr(TTSClient, "submit", lost)
-    for _ in range(2):
-        with pytest.raises(TTSError):
-            synthesize(project)
-    assert keys[0] == keys[1]
-
-
 def test_approvals_invalidated_by_edit(project):
     project.approve("script")
     project.approve("binding")

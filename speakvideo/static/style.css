@@ -994,3 +994,15 @@ summary.draft-step-head:focus-visible { outline: 2px solid var(--focus); outline
 .footage-icon { display: grid; place-items: center; width: 48px; height: 48px; flex-shrink: 0; background: #18263e; color: white; border-radius: 6px; }
 .video-assets-card h3 { font-size: 13px; margin: 0; }
 @media (max-width: 480px) { .footage-editor .grid-2 { grid-template-columns: minmax(0, 1fr); } }
+
+/* Local runtime onboarding */
+.runtime-environment { font-size:12px; line-height:1.8; padding:12px; background:var(--sunken); border-radius:8px; margin-bottom:16px; overflow-wrap:anywhere; }
+.runtime-actions { margin:18px 0; flex-wrap:wrap; }
+.runtime-models { display:grid; gap:12px; }
+.runtime-model { border:1px solid var(--line); padding:14px; border-radius:10px; }
+.runtime-model p { margin:6px 0; overflow-wrap:anywhere; }
+.runtime-logs { max-height:280px; overflow:auto; background:#171b24; color:#e9eef8; padding:14px; border-radius:8px; white-space:pre-wrap; overflow-wrap:anywhere; font:12px/1.7 var(--mono); }
+#runtimeForm { display:grid; gap:12px; }
+#runtimeForm .grid-2 { margin:0; }
+#llmModelChoices { flex-wrap:wrap; max-height:160px; overflow:auto; }
+@media(max-width:600px) { .runtime-actions .btn { flex:1 1 42%; } }

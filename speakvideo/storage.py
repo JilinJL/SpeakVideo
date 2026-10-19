@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -9,6 +8,8 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+from filelock import FileLock, Timeout
 
 SAFE = re.compile(r"^[\w-]{1,60}$")
 
@@ -26,12 +27,16 @@ def atomic_bytes(path: Path, content: bytes) -> None:
         f.write(content)
         f.flush()
         os.fsync(f.fileno())
-    temp.replace(path)
-    directory = os.open(path.parent, os.O_RDONLY)
     try:
-        os.fsync(directory)
+        temp.replace(path)
+        if os.name != "nt":
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
-        os.close(directory)
+        temp.unlink(missing_ok=True)
 
 
 def write_json(path: Path, data: Any) -> None:
@@ -39,7 +44,7 @@ def write_json(path: Path, data: Any) -> None:
 
 
 def read_json(path: Path, default: Any = None) -> Any:
-    return json.loads(path.read_text()) if path.exists() else default
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else default
 
 
 def sha256(path: Path) -> str:
@@ -53,12 +58,12 @@ def sha256(path: Path) -> str:
 @contextmanager
 def lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+") as f:
-        try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise RuntimeError("该工程或 GPU 队列正在运行，请稍后重试") from exc
-        try:
-            yield
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+    guard = FileLock(str(path), timeout=0)
+    try:
+        guard.acquire()
+    except Timeout as exc:
+        raise RuntimeError("该工程或 GPU 队列正在运行，请稍后重试") from exc
+    try:
+        yield
+    finally:
+        guard.release()

@@ -27,7 +27,8 @@ class Project:
                 "template": "duo_dialogue",
                 "meta": {"topic": topic, "keywords": keywords or [], "brief": ""},
                 "cast": [
-                    {"slot": slot, "persona": persona} for slot, persona in DEFAULT_PERSONAS.items()
+                    {"slot": slot, "persona": persona}
+                    for (slot, persona) in DEFAULT_PERSONAS.items()
                 ],
                 "lines": [],
             },
@@ -36,12 +37,7 @@ class Project:
         write_json(self.root / "workflow.json", {"stage": "script_review", "approvals": {}})
         write_json(
             self.root / "manifest.json",
-            {
-                "version": 1,
-                "project_id": uuid.uuid4().hex,
-                "lines": {},
-                "status": "idle",
-            },
+            {"version": 1, "project_id": uuid.uuid4().hex, "lines": {}, "status": "idle"},
         )
 
     def script(self) -> Script:
@@ -50,7 +46,7 @@ class Project:
     def cast(self) -> dict[str, VoiceBinding]:
         return {
             k: VoiceBinding.model_validate(v)
-            for k, v in read_json(self.root / "cast.json", {}).items()
+            for (k, v) in read_json(self.root / "cast.json", {}).items()
         }
 
     def voice_digests(self):
@@ -68,22 +64,17 @@ class Project:
         return result
 
     def digest(self, gate: str) -> str:
-        # Writing controls affect future generations, not the reviewed dialogue.
-        # Excluding the new field also preserves approvals on legacy projects.
         script_data = self.script().model_dump(exclude={"meta": {"prompts"}})
         if gate == "script":
             data = script_data
         elif gate == "binding":
             data = {
                 "script": script_data,
-                "cast": {k: v.model_dump() for k, v in self.cast().items()},
+                "cast": {k: v.model_dump() for (k, v) in self.cast().items()},
                 "voices": self.voice_digests(),
                 "source": {
                     "mode": self.settings.tts.mode,
                     "endpoint": self.settings.tts.base_url,
-                    "worker_id": self.settings.tts.worker_id
-                    if self.settings.tts.mode == "gateway"
-                    else None,
                     "local_pt_root": str(self.settings.tts.local_pt_root)
                     if self.settings.tts.mode == "direct"
                     else None,
@@ -101,15 +92,13 @@ class Project:
             from .video import exported_video, video_config, video_signature
 
             metadata = read_json(self.root / "exports/video.json")
-            video_name, _ = exported_video(self)
+            (video_name, _) = exported_video(self)
             data = {
                 "audio": self.digest("audio"),
                 "signature": metadata["signature"],
                 "current_signature": video_signature(self),
                 "settings": read_json(self.root / "video.json", {}),
-                "video": sha256(
-                    self.root / "exports" / metadata["files"][video_name]["path"]
-                ),
+                "video": sha256(self.root / "exports" / metadata["files"][video_name]["path"]),
             }
             if video_config(self)["cover"]["options"]["enabled"]:
                 cover = read_json(self.root / "exports/cover.json", {})
@@ -117,7 +106,7 @@ class Project:
                     "signature": cover.get("signature"),
                     "files": {
                         name: sha256(self.root / "exports" / f["path"])
-                        for name, f in cover.get("files", {}).items()
+                        for (name, f) in cover.get("files", {}).items()
                     },
                 }
         else:
@@ -135,7 +124,7 @@ class Project:
             return False
 
     def approve(self, gate: str) -> None:
-        if gate == "script" and not self.script().lines:
+        if gate == "script" and (not self.script().lines):
             raise ValueError("空剧本不能定稿")
         if gate == "script":
             from .script.schema import validate_ids
@@ -153,9 +142,9 @@ class Project:
 
             if not video_current(self):
                 raise ValueError("成片已过期、缺失或损坏，请先重新合成视频")
-            if video_config(self)["cover"]["options"]["enabled"] and not cover_current(self):
+            if video_config(self)["cover"]["options"]["enabled"] and (not cover_current(self)):
                 raise ValueError("封面已过期、缺失或损坏，请先重新导出封面")
-            if not all(self.approved(g) for g in ("script", "binding", "audio")):
+            if not all((self.approved(g) for g in ("script", "binding", "audio"))):
                 raise ValueError("请先完成剧本、音色绑定与完整音频确认")
         state = read_json(self.root / "workflow.json", {"approvals": {}})
         state["approvals"][gate] = self.digest(gate)
@@ -169,4 +158,4 @@ class Project:
 
     def save(self, script: Script, cast: dict[str, VoiceBinding]) -> None:
         write_json(self.root / "script.json", script.model_dump())
-        write_json(self.root / "cast.json", {k: v.model_dump() for k, v in cast.items()})
+        write_json(self.root / "cast.json", {k: v.model_dump() for (k, v) in cast.items()})

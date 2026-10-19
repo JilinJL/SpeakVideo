@@ -32,3 +32,5 @@ models/
 .venv-tts/
 .uv/
 .uv-cache/
+
+.cache-install.log

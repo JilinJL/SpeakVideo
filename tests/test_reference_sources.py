@@ -1,18 +1,12 @@
-import base64
-import hashlib
 import io
 import wave
-import zipfile
 
 import pytest
 from fastapi.testclient import TestClient
 
 from speakvideo.storage import atomic_bytes, read_json, write_json
-from speakvideo.tts.client import TTSError
 from speakvideo.voices import VoiceStore
 from speakvideo.web import create_app
-from worker.speakvideo_agent import delete_voice_file
-from worker.voice_library import VoiceLibrary
 
 
 def pcm():
@@ -72,98 +66,6 @@ def test_bound_delete_detaches_only_target_moods_and_removes_real_files(project)
         assert not (project.settings.paths.cache / "voice-trash").exists()
 
 
-def test_windows_crud_renames_reference_and_permanently_deletes_actual_pt(tmp_path):
-    def install(root, files):
-        for entry in files:
-            path = root / "pt" / entry["path"]
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(base64.b64decode(entry["content_base64"]))
-        return []
-
-    library = VoiceLibrary(tmp_path, install)
-    asset = library.manage(
-        {
-            "action": "import",
-            "role": "角色",
-            "emotion": "平静",
-            "content_base64": base64.b64encode(b"prompt").decode(),
-        }
-    )
-    library.save_reference("角色", "平静", pcm()[0], "参考台词")
-    renamed = library.manage(
-        {
-            "action": "edit",
-            "role": "角色",
-            "emotion": "平静",
-            "sha256": asset["sha256"],
-            "new_role": "角色",
-            "new_emotion": "开心",
-            "ref_text": "参考台词",
-            "notes": "录音",
-        }
-    )
-    assert renamed["has_reference"] and not library.path("角色", "平静").exists()
-    with pytest.raises(ValueError, match="SHA256"):
-        library.manage({"action": "delete", "role": "角色", "emotion": "开心", "sha256": "0" * 64})
-    deleted = library.manage(
-        {
-            "action": "delete_permanent",
-            "role": "角色",
-            "emotion": "开心",
-            "sha256": renamed["sha256"],
-        }
-    )
-    assert deleted["deleted"] and not library.path("角色", "开心").exists()
-    assert library.manage({"action": "list"})["assets"] == []
-    assert deleted["permanent"] and "trash_id" not in deleted
-    assert not (tmp_path / ".speakvideo" / "voice-trash").exists()
-    assert not library.path("角色", "开心").with_suffix(".wav").exists()
-    with pytest.raises(ValueError, match="no longer supported"):
-        library.manage({"action": "restore", "id": "a" * 32})
-
-
-def test_windows_hash_guard_and_idempotent_file_deletion(tmp_path):
-    path = tmp_path / "pt" / "角色" / "角色_开心.pt"
-    path.parent.mkdir(parents=True)
-    path.write_bytes(b"prompt")
-    with pytest.raises(ValueError, match="SHA256"):
-        delete_voice_file(tmp_path, "角色", "开心", "0" * 64)
-    digest = hashlib.sha256(b"prompt").hexdigest()
-    assert delete_voice_file(tmp_path, "角色", "开心", digest)["deleted"]
-    assert not path.exists()
-    assert delete_voice_file(tmp_path, "角色", "开心", digest)["already_missing"]
-    assert not (tmp_path / ".speakvideo" / "voice-trash").exists()
-
-
-def test_remote_library_uses_windows_assets_and_blocks_unsupported_writes(project, monkeypatch):
-    settings = project.settings
-    settings.tts.mode = "gateway"
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as bundle:
-        bundle.writestr("archive/data.pkl", b"windows-prompt")
-        bundle.writestr("archive/version", "3")
-    content = buffer.getvalue()
-    monkeypatch.setattr(
-        "speakvideo.tts.client.TTSClient.list_roles", lambda self: {"Windows角色": ["开心"]}
-    )
-    monkeypatch.setattr(
-        "speakvideo.tts.client.TTSClient.download_pt", lambda self, role, emotion: content
-    )
-
-    def unsupported(self, action, **values):
-        raise TTSError("Windows PT 编辑接口尚未部署", 404)
-
-    monkeypatch.setattr("speakvideo.tts.client.TTSClient.manage_voices", unsupported)
-    with TestClient(create_app(settings)) as client:
-        assert client.get("/api/voices").json() == {"Windows角色": ["开心"]}
-        asset = client.get("/api/voices/assets").json()[0]
-        assert asset["source"] == "windows" and not asset["editable"]
-        assert asset["sha256"] == hashlib.sha256(content).hexdigest()
-        assert client.delete("/api/voices/assets/Windows角色/开心").status_code == 409
-        assert VoiceStore(settings).path("Windows角色", "开心").read_bytes() == content
-        assert (settings.paths.voices / "讲述者" / "讲述者_平静.pt").exists()
-
-
 def test_local_qwen_mode_reads_real_qwen_directory_not_speakvideo_copy(project, tmp_path):
     root = tmp_path / "qwen" / "pt"
     path = root / "本机" / "本机_平静.pt"
@@ -176,7 +78,8 @@ def test_local_qwen_mode_reads_real_qwen_directory_not_speakvideo_copy(project, 
         assert client.get("/api/voices/assets/本机/平静/download").content == b"local-prompt"
         assert client.delete("/api/voices/assets/本机/平静").json()["deleted"]
         assert (
-            not path.exists() and (project.settings.paths.voices / "讲述者" / "讲述者_平静.pt").exists()
+            not path.exists()
+            and (project.settings.paths.voices / "讲述者" / "讲述者_平静.pt").exists()
         )
     assert not read_json(project.settings.paths.cache / "voice-deletions.json", [])
 
@@ -230,37 +133,3 @@ def test_source_change_invalidates_binding_approval_without_changing_script(proj
     with TestClient(create_app(project.settings)) as client:
         approvals = client.get("/api/projects/test").json()["workflow"]["approvals"]
         assert approvals["script"] and not approvals["binding"]
-
-
-@pytest.mark.parametrize("old_worker", ["unsupported", "soft_ack"])
-def test_gateway_permanent_delete_keeps_cache_without_permanent_ack(
-    project, monkeypatch, old_worker
-):
-    settings = project.settings
-    settings.tts.mode = "gateway"
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as bundle:
-        bundle.writestr("archive/data.pkl", b"remote-test-prompt")
-        bundle.writestr("archive/version", "3")
-    content = buffer.getvalue()
-    digest = hashlib.sha256(content).hexdigest()
-    actions = []
-
-    def manage(self, action, **values):
-        actions.append(action)
-        if action == "list":
-            return {"assets": [{"role": "远端角色", "emotion": "平静", "sha256": digest}]}
-        assert action == "delete_permanent" and values["sha256"] == digest
-        if old_worker == "unsupported":
-            raise TTSError("unknown voice action", 404)
-        return {"deleted": True}  # A legacy soft-delete acknowledgement is insufficient.
-
-    monkeypatch.setattr("speakvideo.tts.client.TTSClient.manage_voices", manage)
-    monkeypatch.setattr("speakvideo.tts.client.TTSClient.download_pt", lambda *args: content)
-    with TestClient(create_app(settings)) as client:
-        assert client.get("/api/voices/assets").status_code == 200
-        result = client.delete("/api/voices/assets/远端角色/平静?detach=true")
-        assert result.status_code >= 400
-        assert VoiceStore(settings).path("远端角色", "平静").read_bytes() == content
-        assert "delete_permanent" in actions
-        assert not VoiceStore(settings).deletions()

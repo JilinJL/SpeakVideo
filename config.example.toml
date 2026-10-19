@@ -1,20 +1,25 @@
-# Copy to config.local.toml. Secrets belong in environment variables.
+# Optional: copy to config.local.toml. The setup page also works without this file.
 [tts]
-mode = "direct" # direct (local Qwen), gateway (Windows via WSS), demo (test tones)
-base_url = "http://127.0.0.1:8001"
-# Optional: actual local Qwen PT directory. If omitted, discover via /api/pt/list.
-# local_pt_root = "/path/to/qwen3-tts-base-web/pt"
-worker_id = "example-worker" # Required routing target in gateway mode.
-timeout_seconds = 300
-job_timeout_seconds = 1800
-poll_interval_seconds = 1
+mode = "managed" # managed: bundled local inference; direct: existing local Qwen; demo: test tones
+base_url = "http://127.0.0.1:8001" # direct mode only
+# local_pt_root = "/absolute/path/to/existing-qwen/pt" # direct mode only
 max_retries = 2
-# Bump when the remote model/torch/generation settings change.
-generation_revision = "qwen3-base-1.7b-v1"
+timeout_seconds = 300
+generation_revision = "qwen3-runtime-v1"
+
+[runtime]
+model = "base-small" # base-small: 0.6B Base; base: 1.7B Base
+source = "huggingface" # or modelscope; no silent source switching
+# models_dir = "/absolute/path/to/models" # parent of Qwen3-TTS-12Hz-… folders
+# Environment/config is separate from model weights; no second repository needed.
+device = "auto" # auto / mps / cuda:0
+port = 8001
+offline = false
 
 [llm]
-base_url = "https://api.stepfun.com/step_plan/v1"
-model = "step-5-preview" # Configure your own key via the editor or SPEAKVIDEO_LLM_API_KEY.
+# Configure cloud API keys or local services in the workbench; model intentionally unset.
+base_url = "https://api.openai.com/v1"
+model = ""
 json_mode = true
 timeout_seconds = 180
 
@@ -25,4 +30,3 @@ max_line_chars = 200
 master_lufs = -16
 master_true_peak = -1.5
 bgm_volume = 0.18
-# narration uses -16 LUFS / -1.5 dBTP, raw segments remain 24kHz.

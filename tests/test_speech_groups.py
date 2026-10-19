@@ -15,9 +15,8 @@ from speakvideo.script.prompts import DIALOGUE_QUALITY_CONTRACT
 from speakvideo.script.quality import question_particles
 from speakvideo.script.schema import ScriptPrompts
 from speakvideo.storage import atomic_bytes, read_json, write_json
-from speakvideo.tts.client import TTSClient, TTSError
+from speakvideo.tts.client import TTSClient
 from speakvideo.tts.grouping import speech_groups
-from speakvideo.voices import VoiceStore
 from speakvideo.web import create_app
 
 
@@ -122,51 +121,6 @@ def test_voice_slot_length_and_long_pause_are_batch_boundaries(project):
     assert speech_groups(script.lines, cast)[0].text == "没有句号。下一句也没有"
     cast["p2"].role = cast["p1"].role
     assert len(speech_groups(script.lines, cast)) == 2  # never cross speaker slots
-
-
-def test_gateway_group_resume_lost_ack_and_member_retry(project, monkeypatch):
-    script, cast = continuous(project)
-    with TTSClient(project.settings) as client:
-        audio = client.synthesize(text="用于测试的连续语音。", role="讲述者")
-    assets = VoiceStore(project.settings).assets()
-    project.settings.tts.mode = "gateway"
-    for role, emotion, content in assets:
-        atomic_bytes(VoiceStore(project.settings).path(role, emotion), content)
-    monkeypatch.setattr(VoiceStore, "remote_inventory", lambda self, client: self.details())
-    monkeypatch.setattr(VoiceStore, "verify_remote", lambda *args: None)
-    monkeypatch.setattr(TTSClient, "health", lambda self: {"ready": True})
-    keys = []
-
-    def lost(self, payload, key):
-        keys.append(key)
-        raise TTSError("lost acknowledgement")
-
-    monkeypatch.setattr(TTSClient, "submit", lost)
-    for _ in range(2):
-        with pytest.raises(TTSError):
-            synthesize(project)
-    assert keys[0] == keys[1]
-    submissions = []
-    monkeypatch.setattr(
-        TTSClient,
-        "submit",
-        lambda self, payload, key: submissions.append(payload) or f"job{len(submissions)}",
-    )
-    monkeypatch.setattr(
-        TTSClient, "wait_job", lambda *args: (_ for _ in ()).throw(TTSError("poll timeout"))
-    )
-    with pytest.raises(TTSError):
-        synthesize(project)
-    owner = read_json(project.root / "manifest.json")["groups"]["L001"]
-    assert owner["job_id"] == "job1"
-    assert len(submissions) == 1
-    monkeypatch.setattr(TTSClient, "wait_job", lambda *args: audio)
-    synthesize(project)
-    assert len(submissions) == 2
-    synthesize(project, retry_line="L003")
-    assert len(submissions) == 3
-    assert submissions[-1]["text"] == script.lines[0].words + script.lines[1].words
-    assert report(project, False)["reusable"] == 3
 
 
 @pytest.mark.parametrize(

@@ -9,6 +9,7 @@ from dataclasses import asdict
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .inference.models import identity
 from .project import Project
 from .storage import atomic_bytes, lock, read_json, sha256, write_json
 from .tts.client import TTSClient, TTSError, wav_info
@@ -37,19 +38,19 @@ def parameters(project: Project, line, cast: dict, *, group: SpeechGroup | None 
         "language": "Chinese",
         "voice_sha256": sha256(voice),
         "generation_revision": project.settings.tts.generation_revision,
+        "runtime_identity": identity(project.settings)
+        if project.settings.tts.mode == "managed"
+        else "",
         "endpoint": project.settings.tts.base_url,
         "mode": project.settings.tts.mode,
-        **(
-            {"worker_id": project.settings.tts.worker_id}
-            if project.settings.tts.mode == "gateway"
-            else {}
-        ),
     }
     if group is None:
         group = next(
-            g
-            for g in speech_groups(project.script().lines, cast)
-            if any(item.id == line.id for item in g.lines)
+            (
+                g
+                for g in speech_groups(project.script().lines, cast)
+                if any((item.id == line.id for item in g.lines))
+            )
         )
     if len(group.lines) > 1:
         params["speech_group"] = {
@@ -75,15 +76,17 @@ def group_audio(project: Project, group: SpeechGroup, cast: dict, manifest: dict
             parameters(project, line, cast, group=group)
         ):
             raise ValueError("语音组尚未生成或已失效")
-    whole = any(record.get("audio_unit") == "group" for record in records)
+    whole = any((record.get("audio_unit") == "group" for record in records))
     if whole:
         content = (project.root / "audio/groups" / f"{group.id}.wav").read_bytes()
         digest = hashlib.sha256(content).hexdigest()
         if any(
-            record.get("audio_unit") != "group"
-            or record.get("group_id") != group.id
-            or record.get("sha256") != digest
-            for record in records
+            (
+                record.get("audio_unit") != "group"
+                or record.get("group_id") != group.id
+                or record.get("sha256") != digest
+                for record in records
+            )
         ):
             raise ValueError("语音组音频版本不一致")
     else:
@@ -108,7 +111,9 @@ def reusable(
         if not record or record.get("status") != "succeeded":
             return False
         if group is None:
-            group = next(g for g in speech_groups(project.script().lines, cast) if line in g.lines)
+            group = next(
+                (g for g in speech_groups(project.script().lines, cast) if line in g.lines)
+            )
         if manifest is None:
             manifest = read_json(project.root / "manifest.json", {"lines": {}})
         group_audio(project, group, cast, manifest)
@@ -118,7 +123,7 @@ def reusable(
 
 
 def report(project: Project, check_remote: bool = True) -> dict:
-    script, cast = project.script(), project.cast()
+    (script, cast) = (project.script(), project.cast())
     manifest = read_json(project.root / "manifest.json", {"lines": {}})
     groups = speech_groups(script.lines, cast)
     done = {
@@ -166,14 +171,12 @@ def synthesize(
         else SynthesisOptions(concurrency=concurrency).concurrency
     )
     with lock(project.root / ".project.lock"), lock(project.settings.paths.cache / "gpu.lock"):
-        script, cast = project.script(), project.cast()
+        (script, cast) = (project.script(), project.cast())
         if requested - {line.id for line in script.lines}:
             raise ValueError("重试的行 ID 不存在")
         manifest_path = project.root / "manifest.json"
         manifest = read_json(manifest_path)
         with TTSClient(project.settings) as client:
-            if client.mode == "gateway":
-                VoiceStore(project.settings).remote_inventory(client)
             result = preflight(
                 script,
                 cast,
@@ -187,7 +190,7 @@ def synthesize(
             pending = [
                 group
                 for group in groups
-                if (not requested or any(line.id in requested for line in group.lines))
+                if (not requested or any((line.id in requested for line in group.lines)))
                 and (
                     requested
                     or not reusable(
@@ -250,27 +253,10 @@ def synthesize(
                         "status": "pending",
                         "attempts": previous.get("attempts", 0) if same else 0,
                     }
-                    if (
-                        same
-                        and not requested
-                        and previous.get("job_id")
-                        and previous.get("status") != "failed"
-                    ):
-                        record["job_id"] = previous["job_id"]
-                        record["idempotency_key"] = previous["idempotency_key"]
-                    else:
-                        generation = (
-                            previous.get("attempts", 0)
-                            if requested or previous.get("status") == "failed"
-                            else 0
-                        )
-                        record["idempotency_key"] = (
-                            f"{manifest['project_id']}-{line.id}-{fp}-{generation}"
-                        )
+                    record["idempotency_key"] = f"{manifest['project_id']}-{line.id}-{fp}"
                     records[group.id] = record
 
                     def sync_lines():
-                        # All record mutations and serialization share the same lock.
                         if len(group.lines) > 1:
                             for member in group.lines:
                                 manifest["lines"][member.id] = {
@@ -282,7 +268,6 @@ def synthesize(
                                 }
                         write_json(manifest_path, manifest)
 
-                    # Persist the idempotency key before any network request.
                     sync_lines()
                 for attempt in range(project.settings.tts.max_retries + 1):
                     if should_stop():
@@ -292,29 +277,10 @@ def synthesize(
                         record["status"] = "running"
                         sync_lines()
                     try:
-                        payload = {
-                            k: params[k]
-                            for k in (
-                                "text",
-                                "role",
-                                "emotion",
-                                "language",
-                                "voice_sha256",
-                                "generation_revision",
-                            )
-                        }
-                        if client.mode == "gateway":
-                            if not record.get("job_id"):
-                                job_id = client.submit(payload, record["idempotency_key"])
-                                with manifest_lock:
-                                    record["job_id"] = job_id
-                                    sync_lines()
-                            audio = client.wait_job(record["job_id"], should_stop)
-                        else:
-                            audio = client.synthesize(
-                                **{k: params[k] for k in ("text", "role", "emotion", "language")}
-                            )
-                        sr, duration = wav_info(audio.wav_bytes)
+                        audio = client.synthesize(
+                            **{k: params[k] for k in ("text", "role", "emotion", "language")}
+                        )
+                        (sr, duration) = wav_info(audio.wav_bytes)
                         if sr != project.settings.audio.model_sample_rate:
                             raise ValueError(f"{line.id} 采样率为 {sr}，要求 24000；未落盘")
                         with manifest_lock:
@@ -347,19 +313,9 @@ def synthesize(
                     except Exception as exc:
                         with manifest_lock:
                             record["error"] = str(exc)
-                            # Unknown network outcome preserves the job and its key.
-                            record["status"] = "pending" if client.mode == "gateway" else "failed"
-                            if (
-                                client.mode == "gateway"
-                                and isinstance(exc, TTSError)
-                                and str(exc).startswith("远端任务失败")
-                            ):
-                                record["status"] = "failed"
+                            record["status"] = "failed"
                             sync_lines()
-                            if (
-                                client.mode == "gateway"
-                                or attempt == project.settings.tts.max_retries
-                            ):
+                            if attempt == project.settings.tts.max_retries:
                                 if not should_stop():
                                     failures.append(exc)
                                 stopped.set()
@@ -369,14 +325,12 @@ def synthesize(
                         time.sleep(min(2**attempt, 8))
 
             try:
-                # Keep a bounded window, refill only when a group finishes.
-                # HTTPX supports sharing the connection pool across these threads.
                 with ThreadPoolExecutor(max_workers=limit, thread_name_prefix="tts-group") as pool:
                     groups = iter(pending)
                     active = set()
 
                     def fill():
-                        while len(active) < limit and not should_stop():
+                        while len(active) < limit and (not should_stop()):
                             group = next(groups, None)
                             if group is None:
                                 break
@@ -384,14 +338,13 @@ def synthesize(
 
                     fill()
                     while active:
-                        completed, active = wait(active, return_when=FIRST_COMPLETED)
+                        (completed, active) = wait(active, return_when=FIRST_COMPLETED)
                         for future in completed:
                             try:
                                 future.result()
                             except Exception as exc:
-                                # Workers retain the first concrete error; drain every active job.
                                 with manifest_lock:
-                                    if not failures and not cancelled():
+                                    if not failures and (not cancelled()):
                                         failures.append(exc)
                                 stopped.set()
                         fill()
@@ -400,14 +353,14 @@ def synthesize(
                 manifest["status"] = (
                     "paused"
                     if cancelled()
-                    else (
-                        "succeeded"
-                        if all(
+                    else "succeeded"
+                    if all(
+                        (
                             reusable(project, line, cast, manifest["lines"].get(line.id))
                             for line in script.lines
                         )
-                        else "partial"
                     )
+                    else "partial"
                 )
             except BaseException:
                 manifest["status"] = "paused" if cancelled() else "failed"

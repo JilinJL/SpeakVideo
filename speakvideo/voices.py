@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import io
-import uuid
 import zipfile
-from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
 from .config import Settings
 from .storage import atomic_bytes, read_json, safe_name, sha256, write_json
-from .tts.client import TTSClient, TTSError
+from .tts.client import TTSClient
 
 
 class VoiceStore:
@@ -27,70 +25,10 @@ class VoiceStore:
             if not root.is_absolute() or not root.is_dir():
                 raise ValueError("本机 Qwen PT 目录不可用，请检查 tts.local_pt_root")
         self.root = (
-            settings.paths.cache / "remote-voices"
-            if settings.tts.mode == "gateway"
-            else settings.tts.local_pt_root
+            settings.tts.local_pt_root
             if settings.tts.mode == "direct" and settings.tts.local_pt_root
             else settings.paths.voices
         )
-
-    def remote_inventory(self, client: TTSClient) -> list[dict]:
-        try:
-            remote = client.manage_voices("list")
-            entries, editable = remote["assets"], True
-        except TTSError as exc:
-            if exc.status_code != 404:
-                raise
-            entries = [
-                {"role": r, "emotion": e} for r, es in client.list_roles().items() for e in es
-            ]
-            editable = False
-        self.inventory_status = {
-            "editable": editable,
-            "source": "windows",
-            "message": "Windows 音色管理已连接"
-            if editable
-            else "Gateway 缺少 PT 管理路由，请升级网关",
-        }
-        keep = set()
-        updates = []
-        for entry in entries:
-            role, emotion = entry["role"], entry["emotion"]
-            target = self.path(role, emotion)
-            keep.add(target)
-            if not target.exists() or entry.get("sha256") != sha256(target):
-                content = client.download_pt(role, emotion)
-                digest = hashlib.sha256(content).hexdigest()
-                if entry.get("sha256") and digest != entry["sha256"]:
-                    raise ValueError(f"Windows PT 下载哈希不一致: {role}/{emotion}；请刷新后重试")
-                self.validate_pt(content)
-                updates.append((target, content))
-        # Validate every download before replacing any cached inference asset.
-        for target, content in updates:
-            atomic_bytes(target, content)
-        for entry in entries:
-            target = self.path(entry["role"], entry["emotion"])
-            write_json(target.with_suffix(".json"), entry)
-        for target in self.root.glob("*/*.pt"):
-            if target not in keep:
-                target.unlink()
-                target.with_suffix(".json").unlink(missing_ok=True)
-                target.with_suffix(".wav").unlink(missing_ok=True)
-        self.index()
-        return [
-            {
-                **self.detail(v["role"], v["emotion"]),
-                "source": "windows",
-                "editable": editable,
-                "has_reference": v.get("has_reference", False),
-            }
-            for v in entries
-        ]
-
-    def remote_mutation(self, client: TTSClient, action: str, **values):
-        result = client.manage_voices(action, **values)
-        self.remote_inventory(client)
-        return result
 
     def path(self, role: str, emotion: str) -> Path:
         safe_name(role)
@@ -127,18 +65,17 @@ class VoiceStore:
         }
 
     def details(self) -> list[dict]:
-        return [self.detail(r, e) for r, es in self.list_roles().items() for e in es]
+        return [self.detail(r, e) for (r, es) in self.list_roles().items() for e in es]
 
     @staticmethod
     def validate_pt(content: bytes):
         if not content or len(content) > 32 * 1024 * 1024:
             raise ValueError("PT 文件必须非空，且不超过 32 MB")
-        # Inspect the container without unpickling uploaded Torch data on the Mac.
         try:
             with zipfile.ZipFile(io.BytesIO(content)) as bundle:
                 names = bundle.namelist()
-                if not any(n.endswith("/data.pkl") for n in names) or not any(
-                    n.endswith("/version") for n in names
+                if not any((n.endswith("/data.pkl") for n in names)) or not any(
+                    (n.endswith("/version") for n in names)
                 ):
                     raise ValueError("请选择 torch.save 生成的 PT 文件")
         except zipfile.BadZipFile as exc:
@@ -156,7 +93,7 @@ class VoiceStore:
         self.validate_pt(content)
         target = self.path(role, emotion)
         exists = target.exists()
-        if exists and not overwrite:
+        if exists and (not overwrite):
             raise RuntimeError("同名音色已存在；请选择替换文件")
         atomic_bytes(target, content)
         if exists:
@@ -174,7 +111,7 @@ class VoiceStore:
     def edit(
         self, role: str, emotion: str, new_role: str, new_emotion: str, ref_text: str, notes: str
     ):
-        source, target = self.path(role, emotion), self.path(new_role, new_emotion)
+        (source, target) = (self.path(role, emotion), self.path(new_role, new_emotion))
         self.detail(role, emotion)
         if source != target:
             if self.usage(role, emotion):
@@ -188,10 +125,10 @@ class VoiceStore:
         meta.update(ref_text=ref_text, notes=notes, sha256=sha256(target))
         write_json(target.with_suffix(".json"), meta)
         if source != target:
-            self.queue_deletion(role, emotion, sha256(source))
-            source.unlink()
-            source.with_suffix(".json").unlink(missing_ok=True)
-            source.with_suffix(".wav").unlink(missing_ok=True)
+            for old in (source, source.with_suffix(".json"), source.with_suffix(".wav")):
+                old.unlink(missing_ok=True)
+            if not any(source.parent.iterdir()):
+                source.parent.rmdir()
         self.index()
         return self.detail(new_role, new_emotion)
 
@@ -199,10 +136,8 @@ class VoiceStore:
         source = self.path(role, emotion)
         self.detail(role, emotion)
         used = self.usage(role, emotion)
-        if used and not detach:
+        if used and (not detach):
             raise RuntimeError("该 PT 正被工程绑定，请先解除绑定再删除")
-        if not remote_deleted:
-            self.queue_deletion(role, emotion, sha256(source))
         if detach:
             for item in used:
                 folder = self.settings.paths.projects / item["project"]
@@ -213,7 +148,7 @@ class VoiceStore:
                     binding = cast[item["slot"]]
                     binding["mood_map"] = {
                         mood: value
-                        for mood, value in binding["mood_map"].items()
+                        for (mood, value) in binding["mood_map"].items()
                         if value != emotion
                     }
                     write_json(folder / "cast.json", cast)
@@ -230,41 +165,11 @@ class VoiceStore:
         self.index()
         return {"deleted": True, "permanent": True, "detached": used if detach else []}
 
-    def queue_deletion(self, role: str, emotion: str, digest: str):
-        if self.settings.tts.mode != "gateway":
-            return
-        items = self.deletions()
-        items.append(
-            {
-                "id": uuid.uuid4().hex,
-                "role": role,
-                "emotion": emotion,
-                "sha256": digest,
-                "status": "pending",
-                "created_at": datetime.now(UTC).isoformat(),
-            }
-        )
-        write_json(self.settings.paths.cache / "voice-deletions.json", items)
-
     def deletions(self):
-        return read_json(self.settings.paths.cache / "voice-deletions.json", [])
+        return []
 
     def flush_deletions(self, client: TTSClient):
-        items = self.deletions()
-        for item in items:
-            if item["status"] != "pending":
-                continue
-            # Restoring/recreating a name cancels the old deletion. Never delete its new PT.
-            if self.path(item["role"], item["emotion"]).exists():
-                item.update(status="cancelled", error="")
-            else:
-                try:
-                    client.delete_pt(item["role"], item["emotion"], item["sha256"])
-                    item.update(status="deleted", error="")
-                except TTSError as exc:
-                    item["error"] = str(exc)
-            write_json(self.settings.paths.cache / "voice-deletions.json", items)
-        return items
+        return []
 
     def list_roles(self) -> dict[str, list[str]]:
         result = {}
@@ -281,7 +186,7 @@ class VoiceStore:
     def assets(self, needed: set[tuple[str, str]] | None = None):
         return [
             (r, e, self.path(r, e).read_bytes())
-            for r, es in self.list_roles().items()
+            for (r, es) in self.list_roles().items()
             for e in es
             if needed is None or (r, e) in needed
         ]
@@ -292,7 +197,7 @@ class VoiceStore:
             role = p.parent.name
             emotion = p.stem.removeprefix(role + "_")
             dst = self.path(role, emotion)
-            if dst.exists() and dst.read_bytes() != p.read_bytes() and not overwrite:
+            if dst.exists() and dst.read_bytes() != p.read_bytes() and (not overwrite):
                 raise ValueError(f"音色已存在且内容不同: {dst}")
             atomic_bytes(dst, p.read_bytes())
             count += 1
@@ -307,7 +212,7 @@ class VoiceStore:
                 "sha256": sha256(self.path(r, e)),
                 "bytes": self.path(r, e).stat().st_size,
             }
-            for r, es in self.list_roles().items()
+            for (r, es) in self.list_roles().items()
             for e in es
         ]
         write_json(self.root / "index.json", data)
@@ -326,14 +231,14 @@ class VoiceStore:
         if not ref_text:
             raise ValueError("请填写角色原声的对应台词")
         dst = self.path(role, emotion)
-        if dst.exists() and not overwrite:
+        if dst.exists() and (not overwrite):
             raise ValueError("当前音色库已存在同名音色；覆盖需要显式 overwrite")
         client.create_pt(
             reference=reference, role=role, emotion=emotion, ref_text=ref_text, overwrite=overwrite
         )
         content = client.download_pt(role, emotion)
         if not content:
-            raise ValueError("远端返回空 pt")
+            raise ValueError("配音服务返回空 PT")
         atomic_bytes(dst, content)
         atomic_bytes(dst.with_suffix(".wav"), reference.read_bytes())
         write_json(
@@ -346,15 +251,9 @@ class VoiceStore:
     def verify_remote(self, client: TTSClient, needed: set[tuple[str, str]]):
         if client.mode == "demo":
             return
-        if client.mode == "gateway":
-            for r, e in needed:
-                remote = client.download_pt(r, e)
-                if hashlib.sha256(remote).hexdigest() != sha256(self.path(r, e)):
-                    raise ValueError(f"Windows PT 已变化: {r}/{e}；请刷新音色库并重新确认绑定")
-        else:
-            for r, e in needed:
-                remote = hashlib.sha256(client.download_pt(r, e)).hexdigest()
-                if remote != sha256(self.path(r, e)):
-                    raise ValueError(
-                        f"{r}/{e} 本机文件与 Qwen PT 不一致；请检查实际 PT 目录并刷新音色库"
-                    )
+        for r, e in needed:
+            remote = hashlib.sha256(client.download_pt(r, e)).hexdigest()
+            if remote != sha256(self.path(r, e)):
+                raise ValueError(
+                    f"{r}/{e} 本机文件与 Qwen PT 不一致；请检查实际 PT 目录并刷新音色库"
+                )

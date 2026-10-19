@@ -9,13 +9,15 @@ from pathlib import Path
 
 def ffmpeg(args: list[str], cwd: Path | None = None, timeout: float | None = None) -> str:
     if not shutil.which("ffmpeg"):
-        raise RuntimeError("请安装 ffmpeg：brew install ffmpeg")
+        raise RuntimeError("请安装 ffmpeg / ffprobe 并加入 PATH；各平台命令见「本机模型」设备检查")
     try:
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-nostdin", "-y", *map(str, args)],
             cwd=cwd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
@@ -26,10 +28,14 @@ def ffmpeg(args: list[str], cwd: Path | None = None, timeout: float | None = Non
 
 
 def probe(path: Path) -> dict:
+    if not shutil.which("ffprobe"):
+        raise RuntimeError("请安装 ffprobe 并加入 PATH；安装命令见「本机模型」设备检查")
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     )
     return json.loads(result.stdout)

@@ -92,6 +92,7 @@ def merge_audio(project: Project) -> tuple[list[dict], Path]:
 
 def font(size: int):
     for path in [
+        str(Path(__file__).parent / "assets/fonts/NotoSansCJKsc-Regular.otf"),
         "/System/Library/Fonts/PingFang.ttc",
         "/System/Library/Fonts/STHeiti Light.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
@@ -234,7 +235,7 @@ def render_video(
                     ]
                 )
                 clips.append(f"file '{dst.name}'")
-            (work / "broll.txt").write_text("\n".join(clips) + "\n")
+            (work / "broll.txt").write_text("\n".join(clips) + "\n", encoding="utf-8")
             source = work / "broll.mp4"
             ffmpeg(
                 ["-f", "concat", "-safe", "0", "-i", "broll.txt", "-c", "copy", source], cwd=work
@@ -257,7 +258,7 @@ def render_video(
                 img.save(work / name)
                 cards += [f"file '{name}'", f"duration {row['duration'] + row['pause']:.9f}"]
             cards.append(f"file 'card-{len(timeline) - 1:04}.png'")
-            (work / "cards.txt").write_text("\n".join(cards) + "\n")
+            (work / "cards.txt").write_text("\n".join(cards) + "\n", encoding="utf-8")
             video_input = ["-f", "concat", "-safe", "0", "-i", "cards.txt"]
         if burn_subtitles and broll:
             filters = subprocess.run(

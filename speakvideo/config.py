@@ -29,16 +29,34 @@ class Paths(Strict):
 
 
 class TTSSettings(Strict):
-    mode: Literal["direct", "gateway", "demo"] = "direct"
+    mode: Literal["managed", "direct", "demo"] = "managed"
     base_url: str = "http://127.0.0.1:8001"
     api_key: SecretStr = SecretStr("")
-    worker_id: str = "example-worker"
     timeout_seconds: float = Field(default=300, gt=0)
     job_timeout_seconds: float = Field(default=1800, gt=0)
     poll_interval_seconds: float = Field(default=1, gt=0)
     max_retries: int = Field(default=2, ge=0, le=10)
-    generation_revision: str = "qwen3-base-1.7b-v1"
+    generation_revision: str = "qwen3-runtime-v1"
     local_pt_root: Path | None = None
+
+
+class RuntimeSettings(Strict):
+    model: Literal["base-small", "base"] = "base-small"
+    device: str = "auto"
+    source: Literal["huggingface", "modelscope"] = "huggingface"
+    models_dir: Path | None = None
+    offline: bool = False
+    port: int = Field(default=8001, ge=1024, le=65535)
+
+    @model_validator(mode="after")
+    def valid_runtime(self):
+        import re
+
+        if not re.fullmatch(r"auto|mps|cuda(?::[0-9]+)?", self.device):
+            raise ValueError("设备请选择 auto、mps 或 cuda:N；不支持 CPU")
+        if self.models_dir is not None:
+            self.models_dir = self.models_dir.expanduser().resolve()
+        return self
 
 
 class LLMEndpoint(Strict):
@@ -149,6 +167,7 @@ class VideoSettings(Strict):
 class Settings(Strict):
     paths: Paths = Field(default_factory=Paths)
     tts: TTSSettings = Field(default_factory=TTSSettings)
+    runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     audio: AudioSettings = Field(default_factory=AudioSettings)
     script: ScriptSettings = Field(default_factory=ScriptSettings)
@@ -162,19 +181,28 @@ class Settings(Strict):
 def load_settings(root: Path | None = None) -> Settings:
     root = Path(root or os.environ.get("SPEAKVIDEO_ROOT", Path.cwd())).expanduser().resolve()
     path = root / "config.local.toml"
-    data = tomllib.loads(path.read_text()) if path.exists() else {}
+    data = tomllib.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     data["paths"] = {"root": root}
     mode_path = root / ".cache" / "tts-mode.json"
     if mode_path.exists():
         import json
 
-        modes = json.loads(mode_path.read_text())
+        modes = json.loads(mode_path.read_text(encoding="utf-8"))
         data["tts"] = modes[modes["active"]]
+    runtime_path = root / "runtime" / "config.json"
+    if runtime_path.exists():
+        import json
+
+        data["runtime"] = json.loads(runtime_path.read_text(encoding="utf-8"))
+    if data.get("tts", {}).get("mode") == "gateway":
+        raise ValueError(
+            "这是 divide 分支的 Gateway 配置。请继续使用 divide，或备份后移走本地配置再初始化独立版。"
+        )
     llm_path = root / ".cache" / "llm.local.json"
     if llm_path.exists():
         import json
 
-        data["llm"] = json.loads(llm_path.read_text())
+        data["llm"] = json.loads(llm_path.read_text(encoding="utf-8"))
         for provider in data["llm"].get("providers", []):
             # Files written before streaming existed stored the old 8192 default explicitly.
             if "stream" not in provider and provider.get("max_tokens") == 8192:
@@ -184,7 +212,6 @@ def load_settings(root: Path | None = None) -> Settings:
             "MODE": "mode",
             "BASE_URL": "base_url",
             "API_KEY": "api_key",
-            "WORKER_ID": "worker_id",
         },
         "llm": {"BASE_URL": "base_url", "API_KEY": "api_key", "MODEL": "model"},
     }.items():
@@ -199,4 +226,8 @@ def load_settings(root: Path | None = None) -> Settings:
                             provider["api_keys" if key == "api_key" else key] = (
                                 [os.environ[name]] if key == "api_key" else os.environ[name]
                             )
-    return Settings.model_validate(data)
+    settings = Settings.model_validate(data)
+    if settings.tts.mode == "managed":
+        settings.tts.base_url = f"http://127.0.0.1:{settings.runtime.port}"
+        settings.tts.local_pt_root = settings.paths.voices
+    return settings

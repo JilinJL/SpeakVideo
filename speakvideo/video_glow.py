@@ -97,7 +97,7 @@ def glow_track(
         )
     entries.extend([f"file '{prefix}-00.png'", f"option framerate {fps}"])
     listing = work / f"{prefix}.txt"
-    listing.write_text("\n".join(entries) + "\n")
+    listing.write_text("\n".join(entries) + "\n", encoding="utf-8")
     path = work / f"{prefix}.mov"
     ffmpeg(
         [

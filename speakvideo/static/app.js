@@ -204,7 +204,7 @@ async function selectProject(name, {keepTab = false, tab: preferredTab = null} =
   applyRail();
   $('projectName').textContent = current;
   $('title').textContent = data.script.meta.topic || '未命名对话';
-  document.title = `${data.script.meta.topic || current} - SpeakVideo 音频工作台`;
+  document.title = `${data.script.meta.topic || current} - SpeakVideo 对话视频工作台`;
   $('topic').value = data.script.meta.topic; $('keywords').value = data.script.meta.keywords.join(', ');
   $('guidance').value = data.script.meta.guidance || ''; $('brief').value = data.script.meta.brief;
   if ($('draftSettings').dataset.project !== current) {
@@ -538,7 +538,7 @@ async function save() {
   for (const key of ['speech_groups', 'group_audio', 'manifest', 'preflight']) data[key] = fresh[key];
   setSaveState('已保存'); renderSteps(); renderLines(); updateLineReview();
   $('title').textContent = data.script.meta.topic || '未命名对话';
-  document.title = `${data.script.meta.topic || current} - SpeakVideo 音频工作台`;
+  document.title = `${data.script.meta.topic || current} - SpeakVideo 对话视频工作台`;
   renderPromptState(); renderReport(result.preflight);
 }
 
@@ -921,7 +921,7 @@ async function pollTasks() {
           finally { factoryFinishing = ''; renderFactoryTasks(); }
         }
       }
-      if (t.status === 'succeeded' && !t.project && t.label === 'create') { if (t.id === currentCreateTask) setRef('音色已保存，可在音色库中试听与管理。', true); await refreshLibrary(); toast(`音色已保存到${config.tts_mode === 'gateway' ? ' Windows 实际 PT 库' : '本机 Qwen PT 目录'}`); }
+      if (t.status === 'succeeded' && !t.project && t.label === 'create') { if (t.id === currentCreateTask) setRef('音色已保存，可在音色库中试听与管理。', true); await refreshLibrary(); toast(`音色已保存到${'本机音色库'}`); }
       if ([currentDesignTask,currentCreateTask].includes(t.id) && ['failed','paused','interrupted'].includes(t.status)) setRef(`${t.label === 'design' ? '试音' : '克隆'}${TASK_STATES[t.status]}${t.error ? `：${t.error}` : '，可重新提交。'}`);
       if (t.label === 'sync' && ['succeeded', 'failed'].includes(t.status)) await refreshLibrary();
       if (t.label === 'preview' && t.status === 'succeeded') {
@@ -1132,13 +1132,13 @@ async function refreshLibrary() {
       const [assets, status, deletions] = await Promise.all([api('/api/voices/assets'), api('/api/voices/status'), api('/api/voices/deletions')]);
       voiceAssets = assets; libraryEditable = status.editable; renderVoiceAssets();
       $('libraryCount').textContent = `${new Set(assets.map(a => a.role)).size} 个角色 · ${assets.length} 个音色`;
-      $('voiceSource').textContent = `${config.tts_mode === 'gateway' ? 'Windows 音色库' : '本机音色库'} · ${status.message}`;
+      $('voiceSource').textContent = `${'本机音色库'} · ${status.message}`;
       $('voiceSource').title = config.voice_source || '';
       $('ptFile').disabled = !libraryEditable;
       $('libraryNotice').hidden = true;
       const pending = deletions.filter(i => i.status === 'pending');
       $('remoteDeletionState').hidden = !pending.length;
-      $('remoteDeletionState').innerHTML = pending.length ? `${pending.length} 个 Windows 副本待删除：${pending.map(i => escape(`${i.role}/${i.emotion} ${i.error || ''}`)).join('；')} <button type="button" class="btn sm" id="retryRemoteDeletion">重试删除同步</button>` : '';
+      $('remoteDeletionState').innerHTML = pending.length ? `${pending.length} 个待清理文件：${pending.map(i => escape(`${i.role}/${i.emotion} ${i.error || ''}`)).join('；')} <button type="button" class="btn sm" id="retryRemoteDeletion">重试删除同步</button>` : '';
       if (pending.length) $('retryRemoteDeletion').onclick = () => safe(() => queue('/api/voices/deletions/retry', {}));
       await inventory(); await refreshVoiceHistory(); if (data) { renderBindings(); renderLines(); }
       renderMetadataState();
@@ -1333,7 +1333,7 @@ document.addEventListener('play', event => { if (event.target instanceof HTMLAud
 /* ───────── 多供应商 LLM ───────── */
 function renderLLM() {
   $('llmFailover').checked = llmDraft.failover;
-  $('llmProviders').innerHTML = llmDraft.providers.map(p => `<section class="provider-card" data-provider="${escape(p.id)}"><div class="row"><label class="check"><input type="radio" name="llmActive" value="${escape(p.id)}" ${p.id === llmDraft.active_provider ? 'checked' : ''}>默认模型</label><label class="check"><input type="checkbox" data-llm-field="enabled" ${p.enabled ? 'checked' : ''}>启用</label><button class="btn ghost sm danger" data-remove-provider>移除供应商</button></div><div class="grid-2"><label class="field">供应商名称<input data-llm-field="name" value="${escape(p.name)}"></label><label class="field">模型<input data-llm-field="model" value="${escape(p.model)}" placeholder="step-5-preview"></label></div><label class="field">Base URL<input data-llm-field="base_url" value="${escape(p.base_url)}" placeholder="https://api.stepfun.com/step_plan/v1"></label><label class="field">API Key（每行一个）<textarea data-llm-field="new_keys" rows="2" autocomplete="off" spellcheck="false" placeholder="${p.key_count ? `已有 ${p.key_count} 个 Key；留空保留，填写则全部替换` : '填写 API Key；本地免认证服务可留空'}">${escape(p.new_keys || '')}</textarea></label><label class="check"><input type="checkbox" data-llm-field="clear_keys" ${p.clear_keys ? 'checked' : ''}>清除已保存 Key</label><div class="row"><label class="check"><input type="checkbox" data-llm-field="json_mode" ${p.json_mode ? 'checked' : ''}>支持 JSON Mode</label><label class="check" title="边生成边显示，可随时停止；供应商不支持时自动按普通请求处理"><input type="checkbox" data-llm-field="stream" ${p.stream !== false ? 'checked' : ''}>流式输出</label><label class="field inline-field" title="流式时为两段输出之间的最长等待">无响应超时（秒）<input type="number" min="1" max="3600" data-llm-field="timeout_seconds" value="${p.timeout_seconds}"></label><label class="field inline-field">输出上限（tokens）<input type="number" min="32" max="2000000" data-llm-field="max_tokens" value="${p.max_tokens ?? ''}" placeholder="不限"></label></div></section>`).join('');
+  $('llmProviders').innerHTML = llmDraft.providers.map(p => `<section class="provider-card" data-provider="${escape(p.id)}"><div class="row"><label class="check"><input type="radio" name="llmActive" value="${escape(p.id)}" ${p.id === llmDraft.active_provider ? 'checked' : ''}>默认模型</label><label class="check"><input type="checkbox" data-llm-field="enabled" ${p.enabled ? 'checked' : ''}>启用</label><button class="btn ghost sm danger" data-remove-provider>移除供应商</button></div><div class="grid-2"><label class="field">供应商名称<input data-llm-field="name" value="${escape(p.name)}"></label><label class="field">模型<input data-llm-field="model" value="${escape(p.model)}" placeholder="输入模型名称"></label></div><label class="field">Base URL<input data-llm-field="base_url" value="${escape(p.base_url)}" placeholder="https://api.example.com/v1"></label><label class="field">API Key（每行一个）<textarea data-llm-field="new_keys" rows="2" autocomplete="off" spellcheck="false" placeholder="${p.key_count ? `已有 ${p.key_count} 个 Key；留空保留，填写则全部替换` : '填写 API Key；本地免认证服务可留空'}">${escape(p.new_keys || '')}</textarea></label><label class="check"><input type="checkbox" data-llm-field="clear_keys" ${p.clear_keys ? 'checked' : ''}>清除已保存 Key</label><div class="row"><label class="check"><input type="checkbox" data-llm-field="json_mode" ${p.json_mode ? 'checked' : ''}>支持 JSON Mode</label><label class="check" title="边生成边显示，可随时停止；供应商不支持时自动按普通请求处理"><input type="checkbox" data-llm-field="stream" ${p.stream !== false ? 'checked' : ''}>流式输出</label><label class="field inline-field" title="流式时为两段输出之间的最长等待">无响应超时（秒）<input type="number" min="1" max="3600" data-llm-field="timeout_seconds" value="${p.timeout_seconds}"></label><label class="field inline-field">输出上限（tokens）<input type="number" min="32" max="2000000" data-llm-field="max_tokens" value="${p.max_tokens ?? ''}" placeholder="不限"></label></div></section>`).join('');
   $$('[data-provider]').forEach(row => {
     const p = llmDraft.providers.find(p => p.id === row.dataset.provider);
     $$('[data-llm-field]', row).forEach(el => el.oninput = () => p[el.dataset.llmField] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? (el.value === '' ? null : Number(el.value)) : el.value);
@@ -1359,27 +1359,8 @@ async function checkConnections(notify = false) {
     $('connectionDot').className = `foot-state ${c.ready && c.mode !== 'demo' ? 'good' : 'bad'}`;
     $('openConnections').dataset.state = c.mode === 'demo' ? 'demo' : c.ready ? 'ok' : 'bad';
     $('mode').classList.toggle('offline', !c.ready);
-    $('connectionDetails').innerHTML = `<p class="${c.ready ? 'good' : 'bad'}">${escape(c.message)}</p><dl><dt>服务地址</dt><dd>${escape(c.url)}</dd><dt>Gateway</dt><dd>${escape(c.gateway)}</dd><dt>Windows Agent</dt><dd>${escape(c.worker_id)} · ${escape(c.worker)}</dd><dt>GPU 模型</dt><dd>${escape(c.model || '尚未就绪')} ${escape(c.device || '')}</dd><dt>检测耗时</dt><dd>${c.latency_ms} ms</dd></dl><p class="hint">自动每 30 秒检测。Windows 关机或模型加载时会显示未就绪，恢复后自动更新。</p>`;
-    if (c.mode === 'gateway' && c.worker === 'connected') {
-      try {
-        const caps = await api('/api/worker/capabilities');
-        const details = document.createElement('details');
-        const summary = document.createElement('summary');
-        summary.textContent = caps.available ? `Windows 接口文档 · 协议 ${caps.document.protocol} · ${caps.rpc.length} 个 RPC` : caps.message;
-        details.append(summary);
-        if (caps.available) {
-          const hint = document.createElement('p'); hint.className = 'hint';
-          hint.textContent = caps.gateway_capabilities ? '能力发现路由已连接。音色编辑以 PT 管理接口实际返回为准。' : '已通过健康接口读取文档；Gateway 能力发现路由仍需升级。';
-          const pre = document.createElement('pre'); pre.textContent = JSON.stringify(caps.document, null, 2);
-          pre.style.cssText = 'max-height:360px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px';
-          details.append(hint, pre);
-        }
-        $('connectionDetails').append(details);
-      } catch (error) {
-        const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = `接口文档读取失败：${error.message}`;
-        $('connectionDetails').append(hint);
-      }
-    }
+    $('connectionDetails').innerHTML = `<p class="${c.ready ? 'good' : 'bad'}">${escape(c.message)}</p><dl><dt>服务地址</dt><dd>${escape(c.url)}</dd><dt>本机服务</dt><dd>${escape(c.worker)}</dd><dt>GPU 模型</dt><dd>${escape(c.model || '尚未就绪')} ${escape(c.device || '')}</dd><dt>检测耗时</dt><dd>${c.latency_ms} ms</dd></dl><p class="hint">自动每 30 秒检测。模型未安装或正在加载时，请打开「本机模型」查看进度。</p>`;
+
   } catch (error) {
     $('connectionDot').textContent = '检测失败'; $('connectionDot').className = 'foot-state bad'; $('openConnections').dataset.state = 'bad';
     if (notify) toast(error.message, true);
@@ -1631,7 +1612,7 @@ $('ptFile').onchange = () => safe(async () => {
   try {
     const f = new FormData(); f.append('file', file); f.append('role', selectedAsset?.role || $('assetRole').value); f.append('emotion', selectedAsset?.emotion || $('assetEmotion').value); f.append('overwrite', String(!!selectedAsset));
     f.append('ref_text', $('assetRefText').value); f.append('notes', $('assetNotes').value);
-    const result = await api('/api/voices/import', 'POST', f); await refreshLibrary(); selectVoiceAsset(result); toast(config.tts_mode === 'gateway' ? 'PT 已保存到 Windows，Mac 缓存已校验更新' : 'PT 已保存到本机 Qwen 音色库');
+    const result = await api('/api/voices/import', 'POST', f); await refreshLibrary(); selectVoiceAsset(result); toast('PT 已保存到本机音色库');
   } finally { $('ptFile').value = ''; }
   });
 });
@@ -1645,7 +1626,7 @@ $('deletePT').onclick = () => safe(async () => {
     const result = await api(assetURL(asset) + '?detach=true', 'DELETE');
     await refreshLibrary(); selectVoiceAsset(voiceAssets.find(a => a.role === asset.role) || null);
     if (current && !dirty) await selectProject(current, {keepTab:true});
-    toast(result.remote_status === 'pending' ? '音色已删除，Windows 副本仍待同步；请重试删除同步。' : '音色已删除');
+    toast('音色已删除');
   });
 });
 $('previewPT').onclick = () => safe(async () => {
@@ -1675,18 +1656,29 @@ $('libraryDialog').addEventListener('cancel', event => {
 $('openLLM').onclick = () => safe(async () => { llmDraft = await api('/api/llm/config'); renderLLM(); $('llmDialog').showModal(); });
 $('closeLLM').onclick = () => $('llmDialog').close();
 $('addLLMProvider').onclick = () => {
-  const p = {id: 'provider-' + crypto.randomUUID().slice(0, 8), name: '', base_url: '', model: '', enabled: true, json_mode: true, stream: true, timeout_seconds: 180, max_tokens: null, key_count: 0};
+  const preset = {cloud:['云端模型','https://api.openai.com/v1'],ollama:['Ollama','http://127.0.0.1:11434/v1'],lmstudio:['LM Studio','http://127.0.0.1:1234/v1'],vllm:['本机 vLLM','http://127.0.0.1:8000/v1']}[$('llmPreset').value];
+  const p = {id: 'provider-' + crypto.randomUUID().slice(0, 8), name: preset[0], base_url: preset[1], model: '', enabled: true, json_mode: true, stream: true, timeout_seconds: 180, max_tokens: null, key_count: 0};
   llmDraft.failover = $('llmFailover').checked; llmDraft.providers.push(p); llmDraft.active_provider ||= p.id; renderLLM();
 };
+$('discoverLLMModels').onclick = () => safe(async () => {
+  const provider=llmDraft.providers.find(p=>p.id===llmDraft.active_provider); if (!provider) throw Error('请先添加供应商');
+  provider.model ||= '待选择模型';
+  await saveLLM();
+  const result=await api('/api/llm/models?provider_id='+encodeURIComponent(llmDraft.active_provider));
+  const host=$('llmModelChoices');host.replaceChildren();
+  if (!result.models.length) host.textContent='未发现模型，请先在模型服务中加载或下载模型，也可手工填写。';
+  for (const name of result.models) { const button=document.createElement('button');button.className='btn sm';button.textContent=name;button.onclick=()=>{llmDraft.providers.find(p=>p.id===llmDraft.active_provider).model=name;renderLLM();toast('模型已选择，请保存并测试');};host.append(button); }
+});
+$('testLLMStructured').onclick = () => safe(async () => {await saveLLM();await queue('/api/llm/test',{provider_id:llmDraft.active_provider,structured:true});$('llmTestState').textContent='结构化输出测试中…';});
 $('saveLLM').onclick = () => safe(saveLLM);
 $('testLLM').onclick = () => safe(async () => { await saveLLM(); await queue('/api/llm/test', {provider_id: llmDraft.active_provider}); $('llmTestState').textContent = '模型连接测试中…'; });
-$('openConnections').onclick = () => { $('ttsMode').value = config.tts_mode === 'direct' ? 'direct' : 'gateway'; $('connectionDialog').showModal(); checkConnections(); };
+$('openConnections').onclick = () => { $('ttsMode').value = config.tts_mode; $('connectionDialog').showModal(); checkConnections(); };
 $('closeConnections').onclick = () => $('connectionDialog').close();
 $('checkConnections').onclick = () => checkConnections(true);
 $('saveTTSMode').onclick = () => safe(async () => {
   if (dirty) await save();
   config = await api('/api/tts/mode', 'POST', {mode: $('ttsMode').value, local_url: $('localQwenURL').value});
-  $('mode').textContent = config.tts_mode === 'gateway' ? '远端 Windows' : '本机 Qwen';
+  $('mode').textContent = config.tts_mode === 'managed' ? '内置 Qwen' : '本机服务';
   referenceEditor.close(); referenceEditor.buffer = null; referenceId = ''; $('referenceEditor').hidden = true; $('createVoice').disabled = true;
   await checkConnections(); await refreshLibrary();
   if (current) await selectProject(current, {keepTab:true});
@@ -1719,14 +1711,14 @@ async function refreshRuntime() {
   runtimeBusy = true;
   try {
     const r = await api('/api/runtime'), c = r.connection, m = r.metrics;
-    $('terminalBadge').textContent = c.ready ? `${c.worker_id || '本机'} 已就绪` : '未就绪';
+    $('terminalBadge').textContent = c.ready ? `本机已就绪` : '未就绪';
     $('terminal').dataset.state = c.ready ? 'ok' : 'bad';
-    const lines = [`[${new Date().toLocaleTimeString()}] ${config.tts_mode === 'gateway' ? 'Windows / Gateway' : '本机 Qwen'} ${c.url}`, `连接: ${c.gateway} · Worker: ${c.worker} · ${c.message}`, `模型: ${c.model || '未加载'} · ${c.device || '未知设备'}`];
+    const lines = [`[${new Date().toLocaleTimeString()}] ${'本机 Qwen'} ${c.url}`, `本机服务: ${c.worker} · ${c.message}`, `模型: ${c.model || '未加载'} · ${c.device || '未知设备'}`];
     if (m) {
       lines.push(`CPU ${m.cpu_percent ?? '未知'}% · RAM ${m.memory_used_mb ?? '未知'} / ${m.memory_total_mb ?? '未知'} MB`);
       for (const gpu of m.gpus || []) lines.push(`${gpu.name}: GPU ${gpu.utilization_percent}% · VRAM ${gpu.memory_used_mb}/${gpu.memory_total_mb} MB · ${gpu.temperature_c}°C`);
-      lines.push(`Windows 队列: ${m.queue_depth ?? '未知'} · 运行任务: ${m.current_job_id || '空闲'}`);
-      for (const log of m.logs || []) lines.push(`[Windows] ${log}`);
+      lines.push(`本机队列: ${m.queue_depth ?? '未知'} · 运行任务: ${m.current_job_id || '空闲'}`);
+      for (const log of m.logs || []) lines.push(`[本机] ${log}`);
     } else lines.push(`资源监控: ${r.metrics_status}`);
     for (const t of r.tasks.slice(-8)) lines.push(`[${TASK_STATES[t.status] || t.status}] ${TASK_LABELS[t.label] || t.label} ${t.project || ''} · ${taskDetail(t)}${t.error && !taskDetail(t).includes(t.error) ? ` · ${t.error}` : ''}`);
     // 最近一次模型调用（或点「查看日志」选中的任务）展开完整过程和原始输出
@@ -1777,7 +1769,7 @@ window.addEventListener('beforeunload', event => { if (dirty) { event.preventDef
 initVideoDesign();
 safe(async () => {
   config = await api('/api/config');
-  $('mode').textContent = config.tts_mode === 'demo' ? '测试模式' : config.tts_mode === 'gateway' ? '网关模式' : 'Qwen 直连';
+  $('mode').textContent = config.tts_mode === 'demo' ? '测试模式' : config.tts_mode === 'managed' ? '内置 Qwen' : 'Qwen 直连';
   $('mode').classList.toggle('demo', config.tts_mode === 'demo');
   $('openConnections').title = config.tts_mode === 'demo' ? '连接状态：测试模式，非真实配音' : '连接状态';
   $('llmLabel').textContent = config.llm_configured ? '已配置' : '未配置';

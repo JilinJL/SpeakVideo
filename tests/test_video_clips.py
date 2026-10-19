@@ -77,7 +77,11 @@ def test_twenty_minute_video_multiple_ranges_speed_loop_cover_and_audio(project)
         assert background_frame(project, config, 0.7).getpixel((40, 40))[0] > 200
         assert background_frame(project, config, 1.2).getpixel((40, 40))[2] > 200
         meta = render_video(project)
-        target = project.root / "exports" / next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
+        target = (
+            project.root
+            / "exports"
+            / next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
+        )
         for second, channel in [(0.2, 2), (0.7, 0), (1.2, 2)]:
             assert (
                 frame(target, project.root / f"check-{second}.png", second).getpixel((40, 40))[

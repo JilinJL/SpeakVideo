@@ -1,4 +1,5 @@
 import io
+import os
 import time
 import wave
 import zipfile
@@ -8,11 +9,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from speakvideo.config import LLMSettings, load_settings
-from speakvideo.connections import connection_status
 from speakvideo.llm_config import public_llm, save_llm
 from speakvideo.processing import ffmpeg
 from speakvideo.script.engine import OpenAICompatibleProvider
-from speakvideo.tts.client import TTSError
 from speakvideo.web import create_app
 
 
@@ -69,6 +68,7 @@ def test_voice_library_replacement_invalidation_usage_guard_and_permanent_delete
             json={"role": "改名", "emotion": "开心", "ref_text": "你好", "notes": "录音"},
         )
         assert edited.status_code == 200 and edited.json()["notes"] == "录音"
+        assert not (project.settings.paths.voices / "新角色/新角色_平静.pt").exists()
         assert client.get("/api/voices/assets/改名/开心/download").content == pt()
         deleted = client.delete("/api/voices/assets/改名/开心").json()
         assert client.get("/api/voices/assets/改名/开心").status_code == 400
@@ -147,7 +147,8 @@ def test_llm_config_keeps_secrets_private_preserves_keys_and_reloads(project):
     public = save_llm(settings, config_body())
     assert "key-a" not in str(public) and public["providers"][0]["key_count"] == 2
     path = settings.paths.cache / "llm.local.json"
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
     reloaded = load_settings(settings.paths.root)
     assert reloaded.llm.providers[0].api_keys[0].get_secret_value() == "key-a"
     public["providers"][0]["name"] = "新名称"
@@ -199,21 +200,6 @@ def test_llm_key_and_provider_failover_json_mode_and_no_secret_errors(monkeypatc
     assert public_llm(settings)["providers"][0]["key_count"] == 2
 
 
-def test_connection_status_distinguishes_auth_offline_and_network(project, monkeypatch):
-    for code, gateway, worker in [
-        (401, "connected", "unknown"),
-        (503, "connected", "unknown"),
-        (None, "unreachable", "unknown"),
-    ]:
-
-        def fail(self):
-            raise TTSError("test", status_code=code)
-
-        monkeypatch.setattr("speakvideo.connections.TTSClient.health", fail)
-        status = connection_status(project.settings)
-        assert not status["ready"] and status["gateway"] == gateway and status["worker"] == worker
-
-
 def test_voice_preview_is_background_task_and_saves_playable_audio(project):
     with TestClient(create_app(project.settings)) as client:
         task = client.post(
@@ -227,3 +213,52 @@ def test_voice_preview_is_background_task_and_saves_playable_audio(project):
             time.sleep(0.02)
         assert result["status"] == "succeeded", result
         assert client.get("/api/previews/" + result["result"]).content.startswith(b"RIFF")
+
+
+@pytest.mark.parametrize("token", ["", "private-test-token"])
+def test_local_models_discovery_and_structured_script(project, monkeypatch, token):
+    import json
+
+    from test_runtime import wait
+
+    from speakvideo.config import LLMEndpoint
+
+    endpoint = LLMEndpoint(
+        id="local",
+        base_url="http://127.0.0.1:11434/v1",
+        model="local-model",
+        api_keys=[token] if token else [],
+        stream=False,
+    )
+    project.settings.llm = LLMSettings(providers=[endpoint], active_provider="local")
+    client_class = httpx.Client
+    calls = []
+    script = project.script().model_dump()
+    script["meta"] = {}
+
+    def handler(request):
+        calls.append(request)
+        assert request.headers.get("authorization", "") == ("Bearer " + token if token else "")
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "local-model"}]})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(script)}}]
+            },
+        )
+
+    with TestClient(create_app(project.settings)) as c:
+        monkeypatch.setattr(
+            httpx,
+            "Client",
+            lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs),
+        )
+        result = c.get("/api/llm/models", params={"provider_id": "local"})
+        assert result.json() == {"models": ["local-model"]}
+        task = c.post("/api/llm/test", json={"provider_id": "local", "structured": True}).json()
+        result = wait(c, task["id"])
+        assert result["status"] == "succeeded", result
+        assert "结构化剧本通过" in result["result"]
+        assert token == "" or token not in str(result)
+    assert len(calls) == 2

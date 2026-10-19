@@ -1,5 +1,3 @@
-#!/bin/zsh
-set -e
+#!/bin/bash
 cd "$(dirname "$0")"
-uv sync --python 3.11
-exec uv run python deploy/mac_workbench.py install
+exec bash scripts/start.sh

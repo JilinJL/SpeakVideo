@@ -1,6 +1,4 @@
-import io
 import json
-import zipfile
 
 import httpx
 import pytest
@@ -36,10 +34,10 @@ def test_duplicate_ids_slots_and_blank(project):
 
 def test_config_overrides_and_secret_redaction(tmp_path, monkeypatch):
     (tmp_path / "config.local.toml").write_text('[tts]\nmode="direct"\n[llm]\nmodel="local"')
-    monkeypatch.setenv("SPEAKVIDEO_TTS_MODE", "gateway")
+    monkeypatch.setenv("SPEAKVIDEO_TTS_MODE", "demo")
     monkeypatch.setenv("SPEAKVIDEO_LLM_API_KEY", "secret-test")
     config = load_settings(tmp_path)
-    assert config.tts.mode == "gateway"
+    assert config.tts.mode == "demo"
     assert "secret-test" not in repr(config)
 
 
@@ -113,62 +111,6 @@ def test_two_step_engine_preserves_original_brief(project):
     assert provider.calls == [False, True]
     assert result.meta.brief == brief
     assert result.meta.topic == "话题"
-
-
-def test_voice_bundle_checksums(project):
-    assets = VoiceStore(project.settings).assets()
-    project.settings.tts.mode = "gateway"
-    with TTSClient(project.settings) as client:
-
-        def handler(request):
-            content = request.content
-            start = content.index(b"PK\x03\x04")
-            end = content.rindex(b"PK\x05\x06") + 22
-            with zipfile.ZipFile(io.BytesIO(content[start:end])) as z:
-                manifest = json.loads(z.read("manifest.json"))
-                assert len(manifest) == 2
-                assert z.read(manifest[0]["path"])
-            return httpx.Response(200, json={"voices": manifest})
-
-        client._client.close()
-        client._client = httpx.Client(
-            base_url="http://test", transport=httpx.MockTransport(handler)
-        )
-        assert len(client.sync_voices(assets)["voices"]) == 2
-
-
-def test_gateway_rejects_cross_origin_audio(project):
-    project.settings.tts.mode = "gateway"
-    with TTSClient(project.settings) as client:
-        client._client.close()
-        client._client = httpx.Client(
-            base_url=client._base,
-            transport=httpx.MockTransport(
-                lambda r: httpx.Response(
-                    200, json={"status": "succeeded", "audio_url": "https://evil.example/audio"}
-                )
-            ),
-        )
-        with pytest.raises(TTSError, match="跨域"):
-            client.wait_job("abc")
-
-
-def test_gateway_accepts_full_sha256_job_id_and_rejects_path_traversal(project):
-    project.settings.tts.mode = "gateway"
-    with TTSClient(project.settings) as client:
-        job_id = "j_" + "a" * 64
-        client._client.close()
-        client._client = httpx.Client(
-            base_url=client._base,
-            transport=httpx.MockTransport(
-                lambda r: httpx.Response(
-                    200, json={"id": r.url.path.rsplit("/", 1)[-1], "status": "running"}
-                )
-            ),
-        )
-        assert client.poll(job_id)["id"] == job_id
-        with pytest.raises(TTSError, match="任务 ID"):
-            client.poll("../../secret")
 
 
 def test_voice_factory_uses_upload_path_and_downloads_pt(project, tmp_path):

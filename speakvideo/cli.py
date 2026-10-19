@@ -14,8 +14,8 @@ from .tts.client import TTSClient
 from .voices import VoiceStore
 from .workflow import advance, generate_brief, generate_script
 
-app = typer.Typer(help="SpeakVideo · Mac 对谈音频工作台", no_args_is_help=True)
-voices = typer.Typer(help="本地音色工厂与同步")
+app = typer.Typer(help="SpeakVideo · 独立对谈视频工作台", no_args_is_help=True)
+voices = typer.Typer(help="本地音色工厂")
 script = typer.Typer(help="对话草稿、台词生成与验证")
 app.add_typer(voices, name="voices")
 app.add_typer(script, name="script")
@@ -65,8 +65,6 @@ def doctor():
 @app.command()
 def tts(text: str, role: str, emotion: str = "平静", output: Path = Path("preview.wav")):
     with TTSClient(load_settings()) as c:
-        if c.mode == "gateway":
-            raise typer.BadParameter("网关请使用工程 synth 命令，保证任务持久化")
         from .storage import atomic_bytes
 
         atomic_bytes(output, c.synthesize(text=text, role=role, emotion=emotion).wav_bytes)
@@ -76,7 +74,7 @@ def tts(text: str, role: str, emotion: str = "平静", output: Path = Path("prev
 @voices.command("list")
 def voice_list(remote: bool = False):
     s = load_settings()
-    if remote or s.tts.mode == "gateway":
+    if remote:
         with TTSClient(s) as c:
             show(c.list_roles())
     else:
@@ -86,32 +84,14 @@ def voice_list(remote: bool = False):
 @voices.command("import")
 def voice_import(source: Path, overwrite: bool = False):
     s = load_settings()
-    if s.tts.mode == "gateway":
-        import base64
-
-        count = 0
-        with TTSClient(s) as client:
-            for path in sorted(source.glob("*/*.pt")):
-                role = path.parent.name
-                emotion = path.stem.removeprefix(role + "_")
-                client.manage_voices(
-                    "import",
-                    role=role,
-                    emotion=emotion,
-                    overwrite=overwrite,
-                    content_base64=base64.b64encode(path.read_bytes()).decode(),
-                )
-                count += 1
-        show({"imported_to_windows": count})
-    else:
-        show({"imported": VoiceStore(s).import_directory(source, overwrite)})
+    show({"imported": VoiceStore(s).import_directory(source, overwrite)})
 
 
 @voices.command("sync")
 def voice_sync():
     s = load_settings()
     with TTSClient(s) as c:
-        show(VoiceStore(s).remote_inventory(c) if s.tts.mode == "gateway" else c.list_roles())
+        show(c.list_roles())
 
 
 @voices.command("create")
@@ -149,7 +129,7 @@ def generate(name: str):
 def validate(path: Path):
     from .script.schema import Script, validate_ids
 
-    s = Script.model_validate_json(path.read_text())
+    s = Script.model_validate_json(path.read_text(encoding="utf-8"))
     errors = validate_ids(s)
     show({"ok": not errors, "errors": errors, "lines": len(s.lines)})
     if errors:
@@ -205,7 +185,7 @@ def merge(
 
 @app.command()
 def capabilities():
-    """读取 Windows 当前接口文档、RPC、音色操作与限制。"""
+    """读取本机语音接口能力。"""
     with TTSClient(load_settings()) as client:
         show(client.capabilities())
 
@@ -260,7 +240,71 @@ def serve(port: int = 8765):
 
     from .web import create_app
 
-    uvicorn.run(create_app(load_settings()), host="127.0.0.1", port=port, access_log=False)
+    settings = load_settings()
+    from .inference.manager import RuntimeManager
+    from .inference.models import model_path, validate_model
+
+    manager = RuntimeManager(settings)
+    if (
+        settings.tts.mode == "managed"
+        and manager.python.exists()
+        and not validate_model(model_path(settings))
+        and not manager.owned_process()
+    ):
+        import threading
+
+        def autostart():
+            try:
+                manager.action("start")
+            except Exception as exc:
+                typer.echo(f"本机推理尚未就绪：{exc}")
+
+        threading.Thread(target=autostart, daemon=True).start()
+    uvicorn.run(create_app(settings), host="127.0.0.1", port=port, access_log=False)
+
+
+runtime_app = typer.Typer(help="本机模型安装、服务管理与离线校验")
+app.add_typer(runtime_app, name="runtime")
+
+
+@runtime_app.command("status")
+def runtime_status():
+    from .inference.manager import RuntimeManager
+
+    show(RuntimeManager(load_settings()).status())
+
+
+@runtime_app.command("config")
+def runtime_config(
+    model: str = "base-small",
+    device: str = "auto",
+    source: str = "huggingface",
+    models_dir: Path | None = None,
+    offline: bool = False,
+    port: int = 8001,
+):
+    from .inference.manager import RuntimeManager
+
+    show(
+        RuntimeManager(load_settings()).save_config(
+            dict(
+                model=model,
+                device=device,
+                source=source,
+                models_dir=models_dir,
+                offline=offline,
+                port=port,
+            )
+        )
+    )
+
+
+@runtime_app.command("action")
+def runtime_action(action: str, key: str | None = None):
+    from .inference.manager import RuntimeManager
+
+    settings = load_settings()
+    show(RuntimeManager(settings).action(action, key=key or settings.runtime.model))
 
 
 if __name__ == "__main__":
