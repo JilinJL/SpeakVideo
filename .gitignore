@@ -32,3 +32,7 @@ models/
 .venv-tts/
 .uv/
 .uv-cache/
+
+# Previous screenshots are retained only on this private machine.
+docs/*.png
+docs/*.jpg
