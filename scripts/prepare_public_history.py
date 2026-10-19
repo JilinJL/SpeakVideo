@@ -35,6 +35,7 @@ def main():
         # App checkpoints can be tree refs; never let unfiltered private objects survive.
         if ref not in {"refs/heads/main", "refs/heads/divide"} and not ref.startswith("refs/tags/"):
             subprocess.run(["git", "update-ref", "-d", ref], cwd=destination, check=True)
+    subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=destination, check=True)
     command = [
         "uv",
         "tool",
