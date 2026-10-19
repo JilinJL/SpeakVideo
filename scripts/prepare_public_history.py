@@ -31,11 +31,8 @@ def main():
         ["git", "for-each-ref", "--format=%(refname)"], cwd=destination, text=True
     ).splitlines()
     for ref in refs:
-        if (
-            ref.startswith("refs/heads/")
-            and ref not in {"refs/heads/main", "refs/heads/divide"}
-            or ref.startswith(("refs/remotes/", "refs/original/"))
-        ):
+        # App checkpoints can be tree refs; never let unfiltered private objects survive.
+        if ref not in {"refs/heads/main", "refs/heads/divide"} and not ref.startswith("refs/tags/"):
             subprocess.run(["git", "update-ref", "-d", ref], cwd=destination, check=True)
     command = [
         "uv",
@@ -72,7 +69,9 @@ def main():
     command.extend(["--replace-text", str(replacements), "--replace-message", str(replacements)])
     subprocess.run(command, cwd=destination, check=True)
     # The candidate contains only local refs. Publishing remains a separate reviewed operation.
-    subprocess.run(["git", "remote", "remove", "origin"], cwd=destination, check=False)
+    remotes = subprocess.check_output(["git", "remote"], cwd=destination, text=True).splitlines()
+    if "origin" in remotes:
+        subprocess.run(["git", "remote", "remove", "origin"], cwd=destination, check=True)
     print(f"Review candidate at {destination}. No remote push or visibility change was performed.")
 
 
