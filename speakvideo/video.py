@@ -91,21 +91,21 @@ class ClipEdit(BaseModel):
 
 
 def exported_video(project: Project) -> tuple[str, dict] | None:
-    '当前成片文件名与元数据；旧工程仍可能是 final.mp4。'
-    meta = read_json(project.root / 'exports/video.json', {})
-    for name, record in meta.get('files', {}).items():
-        if name.endswith('.mp4'):
+    "当前成片文件名与元数据；旧工程仍可能是 final.mp4。"
+    meta = read_json(project.root / "exports/video.json", {})
+    for name, record in meta.get("files", {}).items():
+        if name.endswith(".mp4"):
             return name, meta
     return None
 
 
 def video_filename(project: Project, config: dict | None = None) -> str:
-    '下载名跟随视频主标题，标题为空时退回工程名。'
+    "下载名跟随视频主标题，标题为空时退回工程名。"
     config = config or video_config(project)
-    cover = config['cover']['options']
-    title = (cover['title'] or project.script().meta.topic or project.name).strip()
-    cleaned = re.sub(r'[^\w\u4e00-\u9fff.-]+', '_', title).strip('._')
-    return (cleaned[:80] or project.name) + '.mp4'
+    cover = config["cover"]["options"]
+    title = (cover["title"] or project.script().meta.topic or project.name).strip()
+    cleaned = re.sub(r"[^\w\u4e00-\u9fff.-]+", "_", title).strip("._")
+    return (cleaned[:80] or project.name) + ".mp4"
 
 
 def default_clip(asset: dict) -> dict:

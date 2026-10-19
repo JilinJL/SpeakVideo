@@ -107,9 +107,7 @@ class Project:
                 "signature": metadata["signature"],
                 "current_signature": video_signature(self),
                 "settings": read_json(self.root / "video.json", {}),
-                "video": sha256(
-                    self.root / "exports" / metadata["files"][video_name]["path"]
-                ),
+                "video": sha256(self.root / "exports" / metadata["files"][video_name]["path"]),
             }
             if video_config(self)["cover"]["options"]["enabled"]:
                 cover = read_json(self.root / "exports/cover.json", {})
