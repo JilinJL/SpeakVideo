@@ -224,7 +224,7 @@
       <!-- 第 3 步：生成 -->
       <section id="production" class="tab tab-production" hidden>
         <div class="card generation-card">
-          <div class="card-head"><h2>生成前检查</h2><button id="preflight" class="btn ghost sm">检查远端可用性</button></div>
+          <div class="card-head"><h2>生成前检查</h2><button id="preflight" class="btn ghost sm">检查配音服务</button></div>
           <div id="report" class="report"></div>
           <div id="lineMap" class="line-map" title="每格一个语音组"></div>
           <div class="production-actions">
@@ -421,6 +421,7 @@
       <span class="library-toolbar-title">角色 / 情绪</span>
       <button id="openVoiceHistory" type="button" class="btn ghost sm">全部试听</button>
       <button id="refreshVoiceLibrary" type="button" class="btn ghost sm">刷新</button>
+      <button id="importExampleVoices" type="button" class="btn ghost sm">导入内置音色</button>
       <details id="libraryNewMenu" class="action-menu"><summary class="btn primary">＋ 新建音色</summary><div class="action-menu-items"><button id="libraryCreate" type="button">录音 / 描述克隆<span>从角色原声创建新声音</span></button><button id="newVoiceAsset" type="button">导入 PT 文件<span>添加已有的音色资产</span></button></div></details>
     </div>
     <p id="voiceSource" class="library-source" role="status"></p>

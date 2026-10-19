@@ -1,0 +1,16 @@
+{
+  "p1": {
+    "role": "懒羊羊",
+    "mood_map": {
+      "normal": "示例06B"
+    },
+    "default_emotion": "示例06B"
+  },
+  "p2": {
+    "role": "喜羊羊",
+    "mood_map": {
+      "normal": "示例06B"
+    },
+    "default_emotion": "示例06B"
+  }
+}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 
@@ -69,7 +70,10 @@ def main():
     callback = (
         "import hashlib\n"
         f"reviewed = {reviewed!r}\n"
+        f"public_assets = {json.loads(Path(__file__).with_name('public_assets.json').read_text())!r}\n"
         "content = value.get_contents_by_identifier(blob_id)\n"
+        "if filename.endswith((b'.pt', b'.wav', b'.mp4')) and public_assets.get(filename.decode('utf-8')) != hashlib.sha256(content).hexdigest():\n"
+        "    return (None, mode, blob_id)\n"
         "if filename in reviewed and hashlib.sha256(content).hexdigest() not in reviewed[filename]:\n"
         "    return (None, mode, blob_id)\n"
         "if not value.is_binary(content):\n"
@@ -79,6 +83,17 @@ def main():
         "return (filename, mode, blob_id)\n"
     )
     command.extend(["--file-info-callback", callback])
+    public_paths = {
+        path.encode()
+        for path in json.loads(Path(__file__).with_name("public_assets.json").read_text())
+    }
+    command.extend(
+        [
+            "--filename-callback",
+            f"if filename.endswith((b'.pt', b'.wav', b'.mp4')) and filename not in {public_paths!r}:\n"
+            "    return None\nreturn filename\n",
+        ]
+    )
     for path in [
         "projects/",
         "voices/",
@@ -94,10 +109,7 @@ def main():
     for pattern in [
         "docs/*.png",
         "docs/*.jpg",
-        "*.pt",
         "*.safetensors",
-        "*.wav",
-        "*.mp4",
         ".env.*",
     ]:
         command.extend(["--path-glob", pattern])

@@ -94,6 +94,15 @@ def voice_sync():
         show(c.list_roles())
 
 
+@voices.command("examples")
+def voice_examples():
+    """恢复当前 Base 档位的内置演示音色，不覆盖已有文件。"""
+    s = load_settings()
+    s.ensure_dirs()
+    with lock(s.paths.cache / "gpu.lock"):
+        show(VoiceStore(s).import_examples())
+
+
 @voices.command("create")
 def voice_create(
     reference: Path, text: str, role: str, emotion: str = "平静", overwrite: bool = False

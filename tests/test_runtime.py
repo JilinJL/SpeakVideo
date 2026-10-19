@@ -52,7 +52,9 @@ def test_fresh_workbench_without_inference_or_llm(tmp_path):
     assert s.tts.mode == "managed" and s.runtime.model == "base-small" and not s.llm.endpoints()
     with TestClient(create_app(s)) as c:
         assert c.get("/").status_code == 200
-        assert c.get("/api/voices").json() == {}
+        assert c.get("/api/voices").json() == {
+            role: ["示例06B"] for role in ("熊大", "熊二", "喜羊羊", "懒羊羊")
+        }
         assert c.get("/api/projects").json() == []
         state = c.get("/api/runtime").json()
         assert not state["installed"] and not state["process"]["health"]["ready"]

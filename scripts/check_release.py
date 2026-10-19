@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
 import subprocess
 import tarfile
 import zipfile
 from pathlib import Path
+
+PUBLIC_ASSETS = json.loads(Path(__file__).with_name("public_assets.json").read_text())
 
 RULES = {
     "private-machine": re.compile(
@@ -34,7 +38,10 @@ def check(name, content):
     if (
         name.startswith(PRIVATE_ROOTS)
         or name in {".env", "config.local.toml", "script-prompts.json"}
-        or name.endswith((".pt", ".safetensors", ".wav", ".mp4"))
+        or (
+            name.endswith((".pt", ".safetensors", ".wav", ".mp4"))
+            and hashlib.sha256(content).hexdigest() != PUBLIC_ASSETS.get(name)
+        )
     ):
         problems.append((name, "private-artifact"))
     if b"\0" not in content[:8192]:

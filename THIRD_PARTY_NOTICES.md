@@ -17,3 +17,7 @@ Noto Sans CJK SC Regular from [notofonts/noto-cjk](https://github.com/notofonts/
 ## System tools
 
 FFmpeg/ffprobe and NVIDIA drivers are installed separately and are not bundled. Their terms depend on the distribution the user chooses. Other Python and JavaScript dependencies retain their respective licenses.
+
+## Curated character voices and finished video
+
+The repository includes four explicitly selected character voice examples, with separate Base 0.6B and Base 1.7B prompts, and one compressed Yangcun Talk video supplied from the author's local files. These third-party character/voice/footage materials are **excluded from the code's Apache-2.0 license**. No third-party open redistribution or commercial-use permission is claimed. See [voice provenance](speakvideo/assets/example-voices/NOTICE.md) and [showcase media provenance](docs/examples/NOTICE.md). The original creator data directories remain excluded from publication.

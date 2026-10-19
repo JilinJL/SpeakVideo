@@ -10,6 +10,8 @@ from .config import Settings
 from .storage import atomic_bytes, read_json, safe_name, sha256, write_json
 from .tts.client import TTSClient
 
+EXAMPLES = Path(__file__).parent / "assets" / "example-voices"
+
 
 class VoiceStore:
     def __init__(self, settings: Settings):
@@ -37,6 +39,43 @@ class VoiceStore:
         if not target.resolve().is_relative_to(self.root.resolve()):
             raise ValueError("音色路径越界")
         return target
+
+    def import_examples(self, *, first_run: bool = False) -> dict:
+        """Install reviewed prompts for this Base size; never overwrite user assets."""
+        from .storage import lock
+
+        if self.settings.tts.mode != "managed":
+            raise ValueError("内置音色适用于托管的本机模型")
+        model = self.settings.runtime.model
+        marker = self.root / f".examples-{model}.json"
+        with lock(self.root / ".examples.lock"):
+            if first_run and marker.exists():
+                return {"imported": 0, "skipped": 0, "model": model}
+            manifest = read_json(EXAMPLES / "manifest.json", {})
+            imported, skipped = 0, 0
+            for entry in manifest.get("voices", []):
+                if entry["model"] != model:
+                    continue
+                source = EXAMPLES / entry["file"]
+                if not source.resolve().is_relative_to(EXAMPLES.resolve()):
+                    raise ValueError("内置音色路径无效")
+                content = source.read_bytes()
+                if hashlib.sha256(content).hexdigest() != entry["sha256"]:
+                    raise ValueError("内置音色校验失败，请重新安装项目")
+                target = self.path(entry["role"], entry["emotion"])
+                if target.exists():
+                    skipped += 1
+                    continue
+                self.import_pt(
+                    entry["role"],
+                    entry["emotion"],
+                    content,
+                    notes=f"内置演示音色 · {model} · 来源及使用说明见 assets/example-voices/NOTICE.md",
+                )
+                imported += 1
+            if imported or skipped:
+                write_json(marker, {"model": model, "version": manifest["version"]})
+            return {"imported": imported, "skipped": skipped, "model": model}
 
     def usage(self, role: str, emotion: str) -> list[dict]:
         result = []

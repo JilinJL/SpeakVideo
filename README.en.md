@@ -1,19 +1,24 @@
 # SpeakVideo
 
-**A standalone workbench for dialogue, voice cloning and video creation.**
+**Self-hosted AI video generator with Qwen3-TTS voice cloning and local text-to-speech.**
 
 [中文](README.md) · [Deployment and recovery](docs/deployment.md) · [Verification status](docs/acceptance.md)
 
 Write or generate a script, clone authorized reference voices, synthesize dialogue, arrange images and video clips, add Chinese subtitles and speaker glow, then export MP4, WAV/MP3, SRT and cover images.
 
-## Branches
+## Finished example
 
-- **main**: standalone local inference. No separate Windows machine, gateway or second Qwen repository required.
-- **divide**: workstation plus a separate GPU worker connected through a gateway.
+**Yangcun Talk: Why does progress make us more anxious?** A complete 2:49 dialogue video from the author's existing local project.
 
-Neither branch distributes personal projects, voice prompts, credentials or model weights.
+<a href="docs/examples/yangcun-talk.mp4"><img src="docs/examples/yangcun-talk.webp" width="280" alt="Watch the complete Yangcun Talk video" /></a>
+
+[Watch / download MP4](docs/examples/yangcun-talk.mp4) · [Follow the illustrated walkthrough](README.md#跟着做完成第一个作品)
+
+The repository contains a compressed 540 × 960 showcase copy (~27 MB). The original 1080 × 1920 video stays on the author's machine.
 
 ## Requirements
+
+Open-source preview: real inference and video export have been verified on Apple Silicon. Windows/Linux NVIDIA end-to-end GPU validation remains pending.
 
 Python 3.11 and uv are prepared by the installer. Install Git and FFmpeg/ffprobe first.
 
@@ -41,7 +46,7 @@ Open [127.0.0.1:8765](http://127.0.0.1:8765). The first-run panel guides you thr
 
 Default: `Qwen/Qwen3-TTS-12Hz-0.6B-Base`. Base 1.7B is optional. Voice design requires the separately downloaded 1.7B VoiceDesign model. Pick Hugging Face or ModelScope explicitly. Downloads can resume; complete models are reused. Only one model stays on the device at a time.
 
-Create a voice from an authorized recording and its transcript before running the real speech test. Preparation and service logs remain available after a browser reload. Routine startup reuses the installed environment and complete model.
+Four bundled example voices (Briar / 熊大, Bramble / 熊二, Pleasant Goat / 喜羊羊, Lazy Goat / 懒羊羊) are copied into the local library on first launch. Choose `示例06B` for Base 0.6B or `示例17B` for Base 1.7B. Use “导入内置音色” in the voice library, or `uv run speakvideo voices examples`, to restore missing examples without replacing existing files. You can also clone a voice from an authorized recording and its transcript. Preparation and service logs remain available after a browser reload. Routine startup reuses the installed environment and complete model.
 
 ## Language models
 
@@ -55,11 +60,26 @@ Use an OpenAI-compatible cloud API with your own key, or connect an existing loc
 
 Keys can be empty for unauthenticated local services. The configuration panel offers model discovery and separate text/JSON tests. If discovery is unsupported, enter the model ID manually. SpeakVideo does not install or manage the LLM itself. Scripts can also be written/imported without an LLM. After models and dependencies are prepared, local LLM plus local TTS works offline.
 
+## Make your first video
+
+1. Create a project with one clear topic. Generate a draft and structured lines using your LLM, or manually add the [four example lines](docs/examples/first-dialogue/script.json).
+2. Finalize the script. Bind P1 to 懒羊羊 and P2 to 喜羊羊, mapping every used mood to the matching Base-size example prompt. P1 is orange; P2 is blue.
+3. Confirm bindings, synthesize speech, listen to each group and retry only groups that need improvement. Merge and review the complete audio.
+4. Upload a background image/video, choose clip ranges and arrange them. Start with 720 × 1280 / 24 fps. Enable burned-in white subtitles with speaker-color outlines.
+5. Optionally add transparent character stickers, bind them to P1/P2, and enable speaking glow. Provide your own character images.
+6. Save video settings, render and review the MP4, then download it. WAV, MP3, SRT and optional covers are available separately.
+
+![Script editor](docs/tutorial/script.webp)
+![Voice bindings](docs/tutorial/binding.webp)
+![Video editing](docs/tutorial/video.webp)
+
+The illustrated Chinese tutorial includes screenshots of all stages. Bundled PTs use the restricted data format and have separate 0.6B / 1.7B variants; the 0.6B examples were re-cloned from synthetic 1.7B references. See [voice provenance](speakvideo/assets/example-voices/NOTICE.md) and [media notices](docs/examples/NOTICE.md). Third-party characters, voices and background footage are not relicensed under Apache-2.0.
+
 ## Data and updates
 
 Back up `projects/`, `voices/`, `voice-previews/`, `.cache/`, `runtime/config.json`, local configuration and global script prompts. Model weights live in `models/` or an external directory you select. These are ignored by Git. `.cache/` includes private LLM configuration and must not be treated as entirely disposable.
 
-Stop tasks and inference before updating with `git pull --ff-only`, then run the installer again. Old gateway configurations require the divide branch. Legacy pickle-based PT files require explicit trusted conversion; they are never automatically unpickled.
+Stop tasks and inference before updating with `git pull --ff-only`, then run the installer again. Legacy pickle-based PT files require explicit trusted conversion; they are never automatically unpickled.
 
 ## Development
 

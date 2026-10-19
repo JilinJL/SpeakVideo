@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "format": "speakvideo.voice.v1",
+  "voices": [
+    {
+      "role": "熊大",
+      "emotion": "示例06B",
+      "source_emotion": "阐述",
+      "model": "base-small",
+      "file": "base-small/熊大_阐述.pt",
+      "bytes": 15781,
+      "sha256": "70bbc7b22dd89f275fbacf9364a5963e397e61503d31cd2affb249ffd06fd055"
+    },
+    {
+      "role": "熊二",
+      "emotion": "示例06B",
+      "source_emotion": "吐槽",
+      "model": "base-small",
+      "file": "base-small/熊二_吐槽.pt",
+      "bytes": 15397,
+      "sha256": "6eb9246172a5a89d6d061ee5db2357c8ce794b5e3895e2f9b1cf7ead55a6f0f1"
+    },
+    {
+      "role": "喜羊羊",
+      "emotion": "示例06B",
+      "source_emotion": "询问",
+      "model": "base-small",
+      "file": "base-small/喜羊羊_询问.pt",
+      "bytes": 17573,
+      "sha256": "51d3a862b5c354d5b50b6874b397b2cc6f4a18d8538125abdc9a8c533b5f5238"
+    },
+    {
+      "role": "懒羊羊",
+      "emotion": "示例06B",
+      "source_emotion": "平静",
+      "model": "base-small",
+      "file": "base-small/懒羊羊_平静.pt",
+      "bytes": 17957,
+      "sha256": "5db7236d2aef229a2040841d1a13d51b006913151ed95737b86ae342496d98e2"
+    },
+    {
+      "role": "熊大",
+      "emotion": "示例17B",
+      "source_emotion": "阐述",
+      "model": "base",
+      "file": "base/熊大_阐述.pt",
+      "bytes": 17125,
+      "sha256": "27ab0461157ea66515339cb161029044e059991dd2de9b9ed0560e96d312ee06"
+    },
+    {
+      "role": "熊二",
+      "emotion": "示例17B",
+      "source_emotion": "吐槽",
+      "model": "base",
+      "file": "base/熊二_吐槽.pt",
+      "bytes": 23077,
+      "sha256": "c806cd1679c66d063217945646b64b4ae494f65ea6123edf6551309c65e72ef6"
+    },
+    {
+      "role": "喜羊羊",
+      "emotion": "示例17B",
+      "source_emotion": "询问",
+      "model": "base",
+      "file": "base/喜羊羊_询问.pt",
+      "bytes": 16357,
+      "sha256": "bb10ea10e76e023d942ccd57b690fc554c5ecfc6e5e073a93a7dc3152d894614"
+    },
+    {
+      "role": "懒羊羊",
+      "emotion": "示例17B",
+      "source_emotion": "平静",
+      "model": "base",
+      "file": "base/懒羊羊_平静.pt",
+      "bytes": 21989,
+      "sha256": "aee5365589b4023eeb760d4270b70e2c4faad0f590d3764c5999b1219dec2691"
+    }
+  ]
+}

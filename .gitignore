@@ -34,3 +34,6 @@ models/
 .uv-cache/
 
 .cache-install.log
+
+# Explicitly reviewed README showcase; all other runtime videos stay ignored.
+!docs/examples/yangcun-talk.mp4

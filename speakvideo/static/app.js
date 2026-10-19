@@ -1566,6 +1566,16 @@ $('syncVoices').onclick = () => safe(async () => {
 $('openLibrary').onclick = () => safe(() => openLibrary());
 $('closeLibrary').onclick = () => $('libraryDialog').close();
 $('voiceSearch').oninput = renderVoiceAssets;
+$('importExampleVoices').onclick = () => safe(async () => {
+  if (libraryMutation) return;
+  const button = $('importExampleVoices');
+  button.disabled = true;
+  try {
+    const result = await api('/api/voices/examples', 'POST', {});
+    await refreshLibrary(); selectVoiceAsset(voiceAssets[0] || null);
+    toast(`已导入 ${result.imported} 个内置音色，保留 ${result.skipped} 个已有音色`);
+  } finally { button.disabled = false; }
+});
 $('newVoiceAsset').onclick = () => { libraryView(); selectVoiceAsset(null); $('assetRole').focus(); };
 $('refreshVoiceLibrary').onclick = () => safe(async () => {
   if (libraryMutation) return;

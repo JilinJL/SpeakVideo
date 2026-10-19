@@ -1,0 +1,58 @@
+{
+  "schema_version": "1.0",
+  "template": "duo_dialogue",
+  "meta": {
+    "topic": "为什么越想进步，越容易焦虑？",
+    "keywords": [
+      "比较",
+      "焦虑",
+      "生活节奏"
+    ],
+    "brief": "p1：喜羊羊，为什么我越想进步，反而越容易焦虑呢？\np2：因为你一直拿别人的进度，衡量自己的生活。\np1：那我今天能先做点什么，让自己轻松一点？\np2：先选一件真正重要的小事，做完它，再给自己一点休息。",
+    "guidance": "",
+    "prompts": {
+      "brief": "",
+      "structure": ""
+    }
+  },
+  "cast": [
+    {
+      "slot": "p1",
+      "persona": "好奇、敢问的聊天伙伴。"
+    },
+    {
+      "slot": "p2",
+      "persona": "用生活例子解释的聊天伙伴。"
+    }
+  ],
+  "lines": [
+    {
+      "id": "L001",
+      "slot": "p1",
+      "words": "喜羊羊，为什么我越想进步，反而越容易焦虑呢？",
+      "mood": "normal",
+      "pause_after_ms": 300
+    },
+    {
+      "id": "L002",
+      "slot": "p2",
+      "words": "因为你一直拿别人的进度，衡量自己的生活。",
+      "mood": "normal",
+      "pause_after_ms": 300
+    },
+    {
+      "id": "L003",
+      "slot": "p1",
+      "words": "那我今天能先做点什么，让自己轻松一点？",
+      "mood": "normal",
+      "pause_after_ms": 300
+    },
+    {
+      "id": "L004",
+      "slot": "p2",
+      "words": "先选一件真正重要的小事，做完它，再给自己一点休息。",
+      "mood": "normal",
+      "pause_after_ms": 300
+    }
+  ]
+}

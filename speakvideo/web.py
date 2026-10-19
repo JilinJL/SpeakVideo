@@ -123,6 +123,8 @@ LLM_LABELS = {"brief", "extend", "generate", "llm_test"}
 
 def create_app(settings: Settings) -> FastAPI:
     settings.ensure_dirs()
+    if settings.tts.mode == "managed":
+        VoiceStore(settings).import_examples(first_run=True)
     app = FastAPI(title="SpeakVideo", version="0.1.0")
     app.add_middleware(
         TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"]
@@ -564,7 +566,10 @@ def create_app(settings: Settings) -> FastAPI:
         ):
             if any(t["status"] in {"queued", "running"} for t in tasks.values()):
                 raise HTTPException(409, "请等待当前任务完成再修改运行配置")
-            return runtime_manager.save_config(body.model_dump())
+            result = runtime_manager.save_config(body.model_dump())
+            if settings.tts.mode == "managed":
+                VoiceStore(settings).import_examples(first_run=True)
+            return result
 
     def runtime_submit(body, model_action=False):
         allowed = (
@@ -688,6 +693,12 @@ def create_app(settings: Settings) -> FastAPI:
     def voice_status():
         inventory_assets()
         return {"editable": True, "source": "local", "message": "本机音色管理已连接"}
+
+    @app.post("/api/voices/examples")
+    def import_example_voices():
+        with submission_lock, lock(settings.paths.cache / "gpu.lock"):
+            mutable_voice()
+            return voice_store().import_examples()
 
     @app.post("/api/voices/import")
     async def import_voice(
