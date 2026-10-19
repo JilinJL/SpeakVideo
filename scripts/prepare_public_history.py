@@ -71,6 +71,8 @@ def main():
         "import hashlib\n"
         f"reviewed = {reviewed!r}\n"
         f"public_assets = {json.loads(Path(__file__).with_name('public_assets.json').read_text())!r}\n"
+        "if filename.endswith((b'.pt', b'.wav', b'.mp4')) and filename.decode('utf-8') not in public_assets:\n"
+        "    return (None, mode, blob_id)\n"
         "content = value.get_contents_by_identifier(blob_id)\n"
         "if filename.endswith((b'.pt', b'.wav', b'.mp4')) and public_assets.get(filename.decode('utf-8')) != hashlib.sha256(content).hexdigest():\n"
         "    return (None, mode, blob_id)\n"
@@ -83,17 +85,6 @@ def main():
         "return (filename, mode, blob_id)\n"
     )
     command.extend(["--file-info-callback", callback])
-    public_paths = {
-        path.encode()
-        for path in json.loads(Path(__file__).with_name("public_assets.json").read_text())
-    }
-    command.extend(
-        [
-            "--filename-callback",
-            f"if filename.endswith((b'.pt', b'.wav', b'.mp4')) and filename not in {public_paths!r}:\n"
-            "    return None\nreturn filename\n",
-        ]
-    )
     for path in [
         "projects/",
         "voices/",
