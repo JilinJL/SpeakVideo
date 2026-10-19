@@ -7,26 +7,31 @@ from fastapi.testclient import TestClient
 from speakvideo.project import Project
 from speakvideo.script.engine import ScriptEngine
 from speakvideo.script.prompts import (
+    BRIEF_OUTPUT_CONTRACT,
     DEFAULT_BRIEF_PROMPT,
     DEFAULT_PERSONAS,
     DIALOGUE_QUALITY_CONTRACT,
     default_prompts,
+    global_prompts,
+    save_global_prompts,
     structure_contract,
     structure_examples,
 )
 from speakvideo.script.schema import CastMember, GeneratedScript, ScriptPrompts
 from speakvideo.storage import read_json, write_json
 from speakvideo.web import create_app
-from speakvideo.workflow import generate_brief, generate_script
+from speakvideo.workflow import extend_brief, generate_brief, generate_script
 
 
-def test_custom_prompts_and_personas_reach_both_requests(project, monkeypatch):
+def test_global_prompts_and_project_personas_reach_both_requests(project, monkeypatch):
     script = project.script()
     script.cast = [
         CastMember(slot="p1", persona="敢问职场问题的新人"),
         CastMember(slot="p2", persona="用真实场景解释的前辈"),
     ]
-    script.meta.prompts = ScriptPrompts(brief="写一段朋友聊天。", structure="保留完整解释和追问。")
+    prompts = ScriptPrompts(brief="写一段朋友聊天。", structure="保留完整解释和追问。")
+    save_global_prompts(project.settings.paths.root, prompts)
+    script.meta.prompts = ScriptPrompts(brief="旧工程提示词不能生效", structure="旧工程台词提示词")
     script.meta.guidance = "先问公司为什么要求员工忠诚。"
     project.save(script, project.cast())
     output = script.model_copy(deep=True)
@@ -43,15 +48,18 @@ def test_custom_prompts_and_personas_reach_both_requests(project, monkeypatch):
     monkeypatch.setattr("speakvideo.workflow.OpenAICompatibleProvider.complete", complete)
     assert generate_brief(project) == draft
     result = generate_script(project)
-    assert calls[0][0] == script.meta.prompts.brief + "\n\n" + DIALOGUE_QUALITY_CONTRACT
-    assert calls[1][0].startswith(script.meta.prompts.structure)
+    assert (
+        calls[0][0]
+        == prompts.brief + "\n\n" + DIALOGUE_QUALITY_CONTRACT + "\n\n" + BRIEF_OUTPUT_CONTRACT
+    )
+    assert calls[1][0].startswith(prompts.structure)
     assert "JSON Schema" in calls[1][0]
     assert "同一 slot" in calls[1][0]
     for _, user, _ in calls:
         assert user["cast"] == [member.model_dump() for member in script.cast]
         assert user["guidance"] == script.meta.guidance
     assert calls[1][1]["brief"] == draft
-    assert result.meta.prompts == script.meta.prompts
+    assert result.meta.prompts == ScriptPrompts()
     assert result.cast == script.cast
     assert result.lines[1].slot == result.lines[2].slot == "p2"
     assert project.script() == result
@@ -81,6 +89,52 @@ def test_generate_directly_from_topic_without_brief(project, monkeypatch):
     assert len(calls) == 1
 
 
+def test_global_prompt_update_reaches_other_project_and_extension(project, monkeypatch):
+    other = Project(project.settings, "another-dialogue")
+    other.create("另一个话题")
+    script = other.script()
+    script.meta.brief = "p1：这个问题怎么理解呢？\np2：先看具体情况。"
+    script.meta.prompts = ScriptPrompts(brief="忽略全局的旧草稿提示", structure="旧台词提示")
+    other.save(script, other.cast())
+    calls = []
+
+    def complete(self, system, user, *, json_output=False):
+        calls.append((system, json.loads(user)))
+        return "p2：具体情况讲清楚了，就知道怎么做了。"
+
+    monkeypatch.setattr("speakvideo.workflow.OpenAICompatibleProvider.complete", complete)
+    save_global_prompts(project.settings.paths.root, ScriptPrompts(brief="第一版全局草稿"))
+    generate_brief(project)
+    save_global_prompts(project.settings.paths.root, ScriptPrompts(brief="第二版全局草稿"))
+    extend_brief(other)
+    generate_brief(other)
+    assert calls[0][0].startswith("第一版全局草稿")
+    assert all(system.startswith("第二版全局草稿") for system, _ in calls[1:])
+    assert calls[0][1]["topic"] != calls[1][1]["topic"]
+    assert "本次任务是扩展已有对话" in calls[1][0]
+    assert all("忽略全局" not in system for system, _ in calls)
+    assert other.script().meta.prompts == script.meta.prompts
+
+
+def test_engine_keeps_global_snapshot_during_request(project):
+    prompts = ScriptPrompts(brief="开始时的全局草稿", structure="开始时的全局台词")
+    calls = []
+    output = {**project.script().model_dump(), "meta": {}}
+
+    class Provider:
+        def complete(self, system, user, *, json_output=False):
+            calls.append(system)
+            prompts.brief, prompts.structure = "后来修改的草稿", "后来修改的台词"
+            return json.dumps(output) if json_output else "p1：这样对吗？\np2：是这个意思。"
+
+    engine = ScriptEngine(Provider(), prompts=prompts)
+    engine.brief("话题", [])
+    engine.structure("话题", [], "草稿")
+    assert calls[0].startswith("开始时的全局草稿")
+    assert calls[1].startswith("开始时的全局台词")
+    assert calls[1].endswith(structure_contract(200))
+
+
 def test_empty_topic_and_draft_rejected_before_llm(project, monkeypatch):
     script = project.script()
     script.meta.topic = " "
@@ -104,21 +158,34 @@ def test_prompt_api_roundtrip_reset_and_legacy_script(project):
         body = client.get("/api/projects/test").json()
         assert body["script"]["meta"]["prompts"] == {"brief": "", "structure": ""}
         custom = {"brief": "允许追问和打断。", "structure": "详细回答，不要口号。"}
-        body["script"]["meta"]["prompts"] = custom
-        assert client.put("/api/projects/test", json=body).status_code == 200
-        assert client.get("/api/projects/test").json()["script"]["meta"]["prompts"] == custom
-        body["script"]["meta"]["prompts"] = {"brief": "", "structure": ""}
-        assert client.put("/api/projects/test", json=body).status_code == 200
+        script_before = (project.root / "script.json").read_bytes()
+        assert client.put("/api/script-prompts", json=custom).json() == custom
+        assert client.get("/api/config").json()["script_prompts"] == custom
+        assert (project.root / "script.json").read_bytes() == script_before
+    with TestClient(create_app(project.settings)) as client:
+        assert client.get("/api/script-prompts").json() == custom
+        assert (
+            client.put("/api/script-prompts", json={"brief": "", "structure": ""}).json()
+            == default_prompts()
+        )
         assert project.script().meta.prompts == ScriptPrompts()
-        body["script"]["meta"]["prompts"]["brief"] = "x" * 20001
-        assert client.put("/api/projects/test", json=body).status_code == 422
+        for invalid in [{"brief": "x" * 20001}, {"brief": 42}, {"contract": "随意修改 Schema"}]:
+            assert client.put("/api/script-prompts", json=invalid).status_code == 422
+        assert global_prompts(project.settings.paths.root).model_dump() == default_prompts()
 
 
 def test_blank_prompt_uses_default_and_contract_still_validates(project):
     class Provider:
         def complete(self, system, user, *, json_output=False):
             if not json_output:
-                assert system == DEFAULT_BRIEF_PROMPT + "\n\n" + DIALOGUE_QUALITY_CONTRACT
+                assert (
+                    system
+                    == DEFAULT_BRIEF_PROMPT
+                    + "\n\n"
+                    + DIALOGUE_QUALITY_CONTRACT
+                    + "\n\n"
+                    + BRIEF_OUTPUT_CONTRACT
+                )
                 return "p1：为什么？\np2：举个例子。"
             invalid = project.script().model_dump()
             invalid["meta"] = {}

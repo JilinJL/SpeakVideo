@@ -96,7 +96,7 @@ def test_export_always_shows_both_stickers_and_only_active_speaker_glows(project
         assert saved["video"]["overlays"][1]["speaker_slot"] == "p2"
         assert saved["video_timeline"] == timeline
         meta = render_video(project)
-        path = project.root / "exports" / meta["files"]["final.mp4"]["path"]
+        path = project.root / "exports" / next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
         pictures = [
             frame(path, project.root / f"glow-check-{i}.png", second)
             for i, second in enumerate([p1_time, p2_time, silence])
@@ -105,16 +105,16 @@ def test_export_always_shows_both_stickers_and_only_active_speaker_glows(project
             # Both white sticker interiors remain visible even when the other speaks or pauses.
             assert min(image.getpixel((140, 116))) > 230
             assert min(image.getpixel((460, 116))) > 230
-        blue, orange, quiet = pictures
+        orange, blue, quiet = pictures
         # Sample just outside the opaque silhouettes, where only the alpha glow can appear.
-        b = blue.getpixel((110, 116))
+        o = orange.getpixel((110, 116))
         q1 = quiet.getpixel((110, 116))
-        o = orange.getpixel((430, 116))
+        b = blue.getpixel((430, 116))
         q2 = quiet.getpixel((430, 116))
-        assert b[2] > q1[2] + 35 and b[2] > b[0] + 35
-        assert o[0] > q2[0] + 35 and o[0] > o[2] + 35
-        assert max(abs(a - b) for a, b in zip(blue.getpixel((430, 116)), q2)) < 8
-        assert max(abs(a - b) for a, b in zip(orange.getpixel((110, 116)), q1)) < 8
+        assert o[0] > q1[0] + 35 and o[0] > o[2] + 35
+        assert b[2] > q2[2] + 35 and b[2] > b[0] + 35
+        assert max(abs(a - b) for a, b in zip(orange.getpixel((430, 116)), q2)) < 8
+        assert max(abs(a - b) for a, b in zip(blue.getpixel((110, 116)), q1)) < 8
         assert video_current(project) and cover_current(project)
         preview = client.post("/api/projects/test/cover-preview", json=request)
         cover = read_json(project.root / "exports/cover.json")
@@ -123,7 +123,7 @@ def test_export_always_shows_both_stickers_and_only_active_speaker_glows(project
             Image.open(project.root / "exports" / cover["files"]["cover.png"]["path"]) as exported,
         ):
             assert predicted.tobytes() == exported.tobytes()
-            assert predicted.getpixel((110, 116))[2] > q1[2] + 35
+            assert predicted.getpixel((110, 116))[0] > q1[0] + 35
         assert (project.root / "exports/audio.json").read_bytes() == audio_bytes
         request["overlays"][0]["speaker_slot"] = "p3"
         assert client.put("/api/projects/test/video", json=request).status_code == 422

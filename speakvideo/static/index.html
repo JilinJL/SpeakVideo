@@ -20,7 +20,7 @@
 <link rel="icon" href="/brand/logo-small.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
 <link rel="manifest" href="/manifest.json">
-<link rel="stylesheet" href="/style.css?v=20261014-video-design">
+<link rel="stylesheet" href="/style.css?v=20261019-video-slim">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -128,8 +128,8 @@
             <button id="welcomeNew" class="btn primary home-create"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg>新建对话</button>
           </div>
           <div class="home-art" aria-hidden="true">
-            <div class="home-voice blue"><span class="home-quote">“</span><div class="home-wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
-            <div class="home-voice orange"><div class="home-wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span class="home-quote">”</span></div>
+            <div class="home-voice orange"><span class="home-quote">“</span><div class="home-wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+            <div class="home-voice blue"><div class="home-wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span class="home-quote">”</span></div>
           </div>
           <div class="home-path"><span><b>01</b>写剧本</span><i>→</i><span><b>02</b>选音色</span><i>→</i><span><b>03</b>做配音</span><i>→</i><span><b>04</b>出视频</span></div>
         </div>
@@ -147,7 +147,7 @@
       <!-- 第 1 步：剧本 -->
       <section id="script" class="tab tab-script">
         <div class="prompt-bar span-2">
-          <span class="prompt-bar-title"><svg class="ico" aria-hidden="true"><use href="#i-sliders"/></svg>脚本提示词</span>
+          <span class="prompt-bar-title"><svg class="ico" aria-hidden="true"><use href="#i-sliders"/></svg>全局脚本提示词</span>
           <div class="prompt-chips">
             <button type="button" class="chip" data-open-prompt="brief">对话草稿<span id="briefPromptState" class="chip-state">默认</span></button>
             <button type="button" class="chip" data-open-prompt="structure">台词生成<span id="structurePromptState" class="chip-state">默认</span></button>
@@ -190,8 +190,19 @@
               <button type="button" class="btn ghost sm" data-discard-llm="generate" hidden title="停止并丢弃本次输出，恢复生成前的内容">放弃</button><button type="button" class="btn danger sm" data-stop-llm="generate" hidden title="停止并保留已生成的部分"><svg class="ico" aria-hidden="true"><use href="#i-stop"/></svg>停止并保留</button>
             </div>
           </div>
+          <div class="line-review-toolbar">
+            <label class="check"><input id="selectAllLines" type="checkbox">全选语音组</label>
+            <span id="lineSelectionCount" class="muted small">已选 0 组</span>
+            <button id="retrySelectedLines" class="btn sm" disabled>重新生成所选组</button>
+            <span id="lineReviewState" class="small" role="status"></span>
+          </div>
+          <div id="lineReviewMap" class="line-map line-review-map" aria-label="语音组生成进度"></div>
+          <div id="linePlayerDock" class="line-player-dock" hidden>
+            <span id="linePlayerTitle" class="small"></span>
+            <audio id="linePlayer" controls preload="none" aria-label="整组配音试听"></audio>
+          </div>
           <div id="lines" class="lines"></div>
-          <p class="hint lines-foot">拖动左侧手柄排序。行 ID 稳定不变。同角色、同音色连续台词合并配音，每组最多 200 字；改变分组或重试一行会重做所在语音组。</p>
+          <p class="hint lines-foot">拖动左侧手柄排序。行 ID 稳定不变。同角色、同音色连续台词合并配音，每组最多 200 字；每组独立试听和重生成，组内台词仅分行编辑，不切分音频。</p>
         </div>
       </section>
 
@@ -211,28 +222,37 @@
 
       <!-- 第 3 步：生成 -->
       <section id="production" class="tab tab-production" hidden>
-        <div class="card">
+        <div class="card generation-card">
           <div class="card-head"><h2>生成前检查</h2><button id="preflight" class="btn ghost sm">检查远端可用性</button></div>
           <div id="report" class="report"></div>
-          <div id="lineMap" class="line-map" title="每格一行台词"></div>
-          <div class="card-foot row">
-            <button data-action="run" class="btn primary">运行完整工作流</button>
-            <button data-action="synth" class="btn">合成 / 断点续跑</button>
-            <button data-action="merge" class="btn">合并并导出</button>
+          <div id="lineMap" class="line-map" title="每格一个语音组"></div>
+          <div class="production-actions">
+            <div class="row">
+              <button data-action="run" class="btn primary">生成到整组试听</button>
+              <button data-action="synth" class="btn">合成 / 断点续跑</button>
+              <button data-action="merge" class="btn">满意，合并完整音频</button>
+            </div>
+            <label class="compact-range synthesis-settings"><span>并发数</span>
+              <input id="synthesisConcurrency" type="range" min="1" max="6" step="1" value="1">
+              <output id="synthesisConcurrencyOut">1 组</output>
+            </label>
           </div>
-        </div>
-
-        <div class="card">
-          <div class="card-head"><h2>背景音乐</h2><span id="mediaState" class="pill"></span></div>
-          <p class="hint">BGM 循环铺满整段音频，人声出现时自动压低。不选则导出纯对谈。</p>
-          <div class="mix-row">
-            <label class="btn file">选择音乐文件<input id="bgmFile" type="file" accept="audio/*"></label>
-            <button id="removeBgm" class="btn ghost">移除</button>
+          <div class="row line-map-legend"><span><i class="succeeded"></i>已生成，可试听</span><span><i class="running"></i>生成中</span><span><i class="queued"></i>排队中</span><span><i class="failed"></i>失败</span><button id="reviewLineAudio" class="btn ghost sm">整组试听 / 多选重生成</button></div>
+          <p class="hint">先整组试听、重生成，确认音色和效果满意后，再手动合并完整音频。重生成期间仍可提交其他语音组，自动排队。</p>
+          <div class="production-mix" role="group" aria-label="背景音乐设置">
+            <div class="row">
+              <span class="mix-label">BGM</span><span id="mediaState" class="muted small"></span>
+              <label class="btn file sm">选择音乐<input id="bgmFile" type="file" accept="audio/*"></label>
+              <button id="removeBgm" class="btn ghost sm">移除</button>
+            </div>
+            <div class="row">
+              <label class="compact-range"><span>音量</span>
+                <input id="bgmVolume" type="range" min="0" max="1" step="0.01" value="0.18">
+                <output id="bgmVolumeOut"></output>
+              </label>
+              <button id="saveMix" class="btn ghost sm">保存混音</button>
+            </div>
           </div>
-          <label class="field">音量 <output id="bgmVolumeOut"></output>
-            <input id="bgmVolume" type="range" min="0" max="1" step="0.01" value="0.18">
-          </label>
-          <div class="card-foot"><button id="saveMix" class="btn">保存混音设置</button></div>
         </div>
 
         <div class="card span-2">
@@ -245,9 +265,25 @@
       <section id="video" class="tab tab-video" hidden>
         <div class="card video-assets-card">
           <div class="card-head"><h2>视频素材</h2><span id="videoAssetCount" class="muted small"></span></div>
-          <p class="hint">按列表顺序播放，素材不足时循环补齐音频时长。素材原声自动静音；不选素材则使用纯色背景。</p>
           <div class="mix-row"><label class="btn file">添加视频 / 图片<input id="videoFiles" type="file" multiple accept="video/*,.png,.jpg,.jpeg,.webp"></label><span id="videoUploadState" class="muted small" role="status"></span></div>
           <div id="videoAssets" class="video-assets"></div>
+          <div id="footageEditor" class="footage-editor" hidden>
+            <div class="card-head"><h3 id="footageTitle">预览与选段</h3><span id="footagePosition" class="muted small"></span></div>
+            <video id="footagePlayer" controls playsinline preload="metadata" aria-label="原视频预览与选段"></video>
+            <p id="footageError" class="hint" role="status" hidden>浏览器无法直接播放该编码（多为 H.265 / 10bit）。可先不播放，直接填写起止时间；或先用其它工具转成 H.264 后再上传。</p>
+            <div class="grid-2">
+              <label class="field">开始时间（分:秒 / 时:分:秒）<input id="clipStart" type="text" value="00:00.000" inputmode="decimal" aria-label="片段开始时间"></label>
+              <label class="field">结束时间（分:秒 / 时:分:秒）<input id="clipEnd" type="text" value="00:00.000" inputmode="decimal" aria-label="片段结束时间"></label>
+            </div>
+            <label class="field">拖动设置起点<input id="clipStartRange" type="range" min="0" max="1" step="0.01" value="0"></label>
+            <label class="field">拖动设置终点<input id="clipEndRange" type="range" min="0" max="1" step="0.01" value="1"></label>
+            <div class="row"><button id="clipMarkStart" class="btn ghost sm">当前画面设为起点</button><button id="clipMarkEnd" class="btn ghost sm">当前画面设为终点</button></div>
+            <div class="row"><label class="field">画面倍速<select id="clipSpeed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1× 原速</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option><option value="3">3×</option><option value="4">4×</option></select></label><span id="clipDuration" class="muted small" role="status"></span></div>
+            <div class="row"><button id="clipApply" class="btn primary">应用到当前片段</button><button id="clipAppend" class="btn">追加为新片段</button></div>
+          </div>
+          <div class="card-head"><h3>合成片段</h3><span id="clipCount" class="muted small"></span></div>
+          <p id="clipSummary" class="hint" role="status"></p>
+          <div id="videoClips" class="video-assets"></div>
         </div>
         <div class="card video-settings-card">
           <div class="card-head"><h2>合成设置</h2><span id="videoAudioState" class="muted small"></span></div>
@@ -257,31 +293,24 @@
             <label class="check"><input id="videoBurnSubtitles" type="checkbox" checked>把字幕烧录到画面，播放时直接可见</label>
             <label class="field">字幕字号（像素）<input id="videoFontSize" type="number" min="16" max="120" step="1" value="48"></label>
             <div id="videoSubtitleLegend" class="subtitle-legend" aria-label="角色字幕颜色"></div>
-            <p class="hint">烧录字幕按角色着色，每页最多两行，按标点换行。竖屏底部留出 15% 安全区，配深色底板。</p>
-            <p class="hint">使用当前完整音频（含已保存的 BGM），字幕跟随台词时间线。不同尺寸居中裁切填满，导出 H.264 + AAC 的 MP4。</p>
           </div>
           <div class="card-foot row"><button id="saveVideo" class="btn">保存视频设置</button><button data-action="render" class="btn primary">合成并导出视频</button></div>
         </div>
         <div class="card video-design-card">
           <div class="card-head"><h2>画面定制</h2><div class="row design-tabs"><button id="editOverlayTab" class="btn ghost sm" aria-pressed="true">视频贴图</button><button id="editCoverTab" class="btn ghost sm" aria-pressed="false">封面预览</button></div></div>
-          <p id="designHint" class="hint">上传角色透明 PNG，在画面里拖动位置，拖动右下角调整大小。字幕合成时会叠在最上层。</p>
-          <div class="design-time"><label>预览时间（秒）<input id="designSecond" type="number" min="0" step="0.01" value="0"></label><button id="playDesignAudio" class="btn sm" disabled>播放发言预览</button><span id="designPreviewState" class="muted small" role="status"></span></div>
-          <audio id="designAudio" preload="metadata" hidden></audio>
           <div id="designStage" class="design-stage" aria-label="视频贴图布局预览">
             <img id="designBackgroundImage" alt="背景素材" hidden>
             <video id="designBackgroundVideo" muted playsinline preload="auto" hidden></video>
             <div id="designLayers"></div>
-            <div id="designSubtitleGuide" class="design-subtitle-guide">字幕区域 · 合成时显示真实台词</div>
             <img id="coverDesignPreview" alt="定制封面预览" hidden>
           </div>
-          <div class="mix-row"><label class="btn file">添加贴图<input id="overlayFiles" type="file" multiple accept=".png,.webp,.jpg,.jpeg"></label><span class="muted small">透明 PNG / WebP · 最多 12 张</span></div>
+          <div class="mix-row"><label class="btn file">添加贴图<input id="overlayFiles" type="file" multiple accept=".png,.webp,.jpg,.jpeg"></label></div>
           <div id="overlayList" class="overlay-list"></div>
           <fieldset id="overlayControls" class="overlay-controls" hidden>
             <legend id="overlaySelectedName">贴图设置</legend>
-            <label class="field">绑定说话角色<select id="overlaySpeaker"><option value="">不绑定 · 普通贴图</option><option value="p1">角色 1 · 蓝色高光</option><option value="p2">角色 2 · 橙色高光</option></select></label>
+            <label class="field">绑定说话角色<select id="overlaySpeaker"><option value="">不绑定 · 普通贴图</option><option value="p1">角色 1 · 橙色高光</option><option value="p2">角色 2 · 蓝色高光</option></select></label>
             <label class="check"><input id="overlaySpeakingGlow" type="checkbox" checked>该角色发言时自动泛光</label>
             <label class="field">高光强度 <output id="overlayGlowOut"></output><input id="overlayGlowStrength" type="range" min="0" max="100" step="1" value="85"></label>
-            <p class="hint">高光沿用角色字幕颜色，停顿时熄灭。默认全程显示；可用下方时间设置限制贴图出现的区间。</p>
             <div class="grid-2"><label class="field">水平位置（%）<input id="overlayX" type="number" min="0" max="100" step="0.1"></label><label class="field">垂直位置（%）<input id="overlayY" type="number" min="0" max="100" step="0.1"></label></div>
             <label class="field">宽度 <output id="overlayWidthOut"></output><input id="overlayWidth" type="range" min="2" max="100" step="0.1"></label>
             <label class="field">不透明度 <output id="overlayOpacityOut"></output><input id="overlayOpacity" type="range" min="0" max="100" step="1"></label>
@@ -290,30 +319,26 @@
           </fieldset>
         </div>
         <div class="card video-cover-card">
-          <div class="card-head"><h2>定制封面</h2><span id="coverState" class="muted small"></span></div>
+          <div class="card-head"><h2>定制封面</h2><span id="coverState" class="muted small"></span><span id="designPreviewState" class="muted small" role="status"></span></div>
           <div class="card-scroll">
-            <label class="check"><input id="coverEnabled" type="checkbox">合成视频时一并导出封面，放入交付包</label>
             <label class="field">封面底图<select id="coverBackground"><option value="frame">使用背景视频 / 图片的指定画面</option><option value="image">使用上传的封面底图</option></select></label>
             <div class="row"><label class="btn file">上传封面底图<input id="coverFile" type="file" accept=".png,.jpg,.jpeg,.webp"></label><span id="coverImageName" class="muted small"></span></div>
-            <label class="field">取画面时间（秒）<input id="coverSecond" type="number" min="0" step="0.1" value="0"></label>
             <label class="field">主标题<textarea id="coverTitle" rows="2" maxlength="120" placeholder="写一个让人想点开的标题"></textarea></label>
             <label class="field">副标题<input id="coverSubtitle" maxlength="200" placeholder="补充一句，或留空"></label>
             <div class="grid-2"><label class="field">标题字号<input id="coverFontSize" type="number" min="24" max="160" value="88"></label><label class="field">文字颜色<input id="coverColor" type="color" value="#ffffff"></label></div>
-            <label class="field">标题距顶部 <output id="coverYOut"></output><input id="coverY" type="range" min="0" max="85" step="1" value="12"></label>
+            <label class="field">标题距顶部 <output id="coverYOut"></output><input id="coverY" type="range" min="0" max="85" step="1" value="20"></label>
             <label class="field">底图压暗 <output id="coverShadeOut"></output><input id="coverShade" type="range" min="0" max="85" step="1" value="25"></label>
             <label class="check"><input id="coverShowOverlays" type="checkbox" checked>封面保留该时刻的角色贴图</label>
-            <p class="hint">封面导出为独立 PNG 和 JPG，不增加视频片头时长。改封面后可以只导出封面。</p>
           </div>
           <div class="card-foot row"><button id="previewCover" class="btn">预览封面</button><button data-action="cover" class="btn primary">导出封面</button></div>
           <div id="coverExports" class="exports cover-exports"></div>
         </div>
         <div class="card video-preview-card">
           <div class="card-head"><h2>成片预览</h2><span id="videoState" class="muted small"></span></div>
-          <div id="videoEmpty" class="video-preview-empty"><span>成片预览</span><p>添加素材，调整设置，然后合成视频。</p><small>也可以直接使用纯色背景配合台词字幕。</small></div>
+          <div id="videoEmpty" class="video-preview-empty"><span>成片预览</span><p>添加素材，调整设置，然后合成视频。</p></div>
           <video id="finalVideo" controls preload="metadata" playsinline aria-label="完整视频预览" hidden></video>
           <div id="videoExports" class="exports"></div>
-          <div class="card-foot row"><button id="approveVideo" data-approve="video" class="btn">确认当前成片</button><button data-action="package" class="btn primary">打包交付 ZIP</button><span id="deliveryState" class="muted small"></span></div>
-          <div id="deliveryExports" class="exports"></div>
+          <div class="card-foot row"><button id="approveVideo" data-approve="video" class="btn">确认当前成片</button></div>
         </div>
       </section>
     </div>
@@ -321,7 +346,7 @@
 
   <!-- ───────── 右栏：任务队列 ───────── -->
   <aside class="rail" id="rail" aria-label="任务队列">
-    <div class="rail-head"><h4>任务</h4><span class="muted small">串行执行，自动断点</span><button id="closeRail" class="icon-btn" title="隐藏任务栏" aria-label="隐藏任务栏"><svg class="ico" aria-hidden="true"><use href="#i-x"/></svg></button></div>
+    <div class="rail-head"><h4>任务</h4><span class="muted small">配音支持并发，自动断点</span><button id="closeRail" class="icon-btn" title="隐藏任务栏" aria-label="隐藏任务栏"><svg class="ico" aria-hidden="true"><use href="#i-x"/></svg></button></div>
     <div id="tasks" class="tasks"></div>
   </aside>
 </div>
@@ -460,7 +485,7 @@
 <!-- 脚本提示词：一次只编辑一份，取消可整体撤回 -->
 <dialog id="promptDialog" class="dialog prompt-dialog">
   <div class="dialog-head">
-    <h2>脚本提示词</h2>
+    <h2>全局脚本提示词</h2>
     <div class="seg" role="tablist">
       <button type="button" role="tab" data-prompt-tab="brief">对话草稿<i class="seg-dot" title="已自定义"></i></button>
       <button type="button" role="tab" data-prompt-tab="structure">台词生成<i class="seg-dot" title="已自定义"></i></button>
@@ -480,7 +505,7 @@
     </div>
   </div>
   <div class="dialog-foot">
-    <span class="hint foot-note">保存到当前工程，下次生成时生效。</span>
+    <span class="hint foot-note">所有工程共用，下次生成时生效。</span>
     <button type="button" id="cancelPrompts" class="btn ghost">取消</button>
     <button type="button" id="savePrompts" class="btn primary">保存提示词</button>
   </div>
@@ -503,7 +528,8 @@
 
 <script src="/reference-editor.js?v=20261014-source"></script>
 <script src="/dialogue-timing.js?v=20261014"></script>
-<script src="/video-design.js?v=20261014-speaking-glow"></script>
-<script src="/app.js?v=20261014-speaking-glow"></script>
+<script src="/video-design.js?v=20261019-video-slim"></script>
+<script src="/app.js?v=20261019-video-slim"></script>
+<script src="/video-editor.js?v=20261019-video-slim"></script>
 </body>
 </html>

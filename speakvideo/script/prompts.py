@@ -1,9 +1,11 @@
-"""Editable writing instructions; the JSON/audio contract stays in the engine."""
+"""Global writing instructions and the shared JSON/audio contract."""
 
 import json
+from pathlib import Path
 
+from ..storage import lock, read_json, write_json
 from .moods import mood_vocab_for_prompt
-from .schema import GeneratedScript
+from .schema import GeneratedScript, ScriptPrompts
 
 DEFAULT_PERSONAS = {
     "p1": "好奇、敢问的聊天伙伴。直说疑惑，敢质疑常见说法，会顺着回答追问，不故意抬杠。",
@@ -32,25 +34,49 @@ DEFAULT_BRIEF_PROMPT = """你负责写两个普通人之间自然、具体、有
 草稿必须围绕开头的问题形成闭环，末尾给出明确结论和自然收尾，不以新的未回答问题或“下次再聊”结束。
 疑问句要带自然尾词，例如“对吗？”、“为什么呢？”，避免缺少疑问语气。
 
-只输出可直接朗读的完整对话草稿，用 p1：、p2：标记说话人。不输出编剧分析、章节提纲、舞台说明或 JSON。
-写法参考（只参考接话方式，不照抄话题）：
-p1：我问个不太客气的，老板说公司是个大家庭，为什么一裁员就算账算得那么清楚？
-p2：因为这两个说法对应的东西不一样。说“大家庭”是在谈感情，裁员处理的是劳动关系。比如一个部门不赚钱了，公司可能砍掉它；但被裁的人也不能只得到一句“谢谢你的付出”。
-p1：那平时说这话，是不是就在骗我？
-p2：也不能只凭这句话就下结论。你可以看它有没有对应的实际行动：遇到困难时愿不愿意一起承担，承诺过的待遇有没有兑现。判断这段关系，要看这些具体的事。
 """
 
-DEFAULT_STRUCTURE_PROMPT = """把用户提供的对话草稿整理成双人台词，保留原来的问题、解释、例子和接话关系，不压缩成长篇提纲或口号。
+DEFAULT_STRUCTURE_PROMPT = """根据草稿的基本思路和大致话题走向，生成和补全人物之间的对话，草稿中有省略轮次内容的地方你要考虑补全，完善。
 如果提供的是创作想法、旧版编剧阐述，或者还没有草稿，就根据话题和要求写出自然的完整对话。
-默认 p1 敢于提出尖锐但真实的疑问，p2 直接回应并耐心讲透，解释要有具体例子、原因和适用边界；用户提供的人设与要求优先。
-不套用博客的“引言—分点论述—总结”结构，不强制包袱、金句或反转；结尾要自然明确地回答话题。
-追问应当由上一段回答引出，不机械地轮流说话。长回答按语义和句子边界拆成同一说话人的连续台词，不能为了换人或缩短每行而删掉解释。
-台词只包含实际说出口的话，情绪和停顿自然、克制，不把标题、编号或动作说明读出来。
+
+默认设定：
+- p1 敢于提出尖锐但真实的疑问，语气可以带点不耐烦、好奇或怀疑，但不要刻意挑衅。
+- p2 直接回应并耐心讲透，解释必须有具体例子、原因和适用边界。用户提供的人设与要求优先。
+
+【关键要求：人味与口语感】
+1. 台词必须是真人说话的样子，而不是书面表达。鼓励：
+   - 口语化用词、省略、重复
+   - 自然停顿和语气词（嗯、没毛病、那个、其实、说白了、你想啊……）
+   - 不完全正确的语法和松散结构
+2. 禁止书面腔、新闻腔、教科书腔。避免“首先……其次……最后……”这种分点结构出现在台词里，禁止发明晦涩的非生活化词语。
+3. 追问必须由上一句回答自然引出，不要机械轮流。p1 可以因为听懂了或没听懂而改变语气和追问角度。
+4. 长回答按语义和句子边界拆成同一说话人的连续台词，宁可一个人连续说三四句，也不要为了换人而硬切。
+5. 情绪和停顿要克制、真实，通过用词和节奏体现，不要写括号动作或情绪标注。
+6. 结尾自然明确地回答话题，不强制金句、反转或总结口号。
 """
+
+BRIEF_OUTPUT_CONTRACT = "只输出可直接朗读的完整对话草稿，用 p1：、p2：标记说话人。不输出编剧分析、章节提纲、舞台说明或 JSON。"
 
 
 def default_prompts() -> dict[str, str]:
     return {"brief": DEFAULT_BRIEF_PROMPT, "structure": DEFAULT_STRUCTURE_PROMPT}
+
+
+def global_prompts(root: Path) -> ScriptPrompts:
+    """Legacy project overrides never participate in global prompt selection."""
+    saved = ScriptPrompts.model_validate(read_json(root / "script-prompts.json", {}))
+    return ScriptPrompts(
+        **{
+            key: getattr(saved, key) if getattr(saved, key).strip() else value
+            for key, value in default_prompts().items()
+        }
+    )
+
+
+def save_global_prompts(root: Path, prompts: ScriptPrompts) -> ScriptPrompts:
+    with lock(root / ".cache" / "script-prompts.lock"):
+        write_json(root / "script-prompts.json", prompts.model_dump())
+        return global_prompts(root)
 
 
 def structure_examples(max_line_chars: int) -> list[dict]:

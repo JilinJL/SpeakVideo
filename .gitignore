@@ -8,6 +8,7 @@ __pycache__/
 .env
 .env.*
 config.local.toml
+script-prompts.json
 projects/*/audio/
 projects/*/exports/
 projects/*/assets/
@@ -23,3 +24,11 @@ logs/
 gateway/speakvideo-gateway
 
 voice-previews/
+
+# Private creator data; keep in external backups, never publish.
+projects/
+voices/
+models/
+.venv-tts/
+.uv/
+.uv-cache/

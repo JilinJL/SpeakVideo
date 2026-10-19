@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import tempfile
 import uuid
 from contextlib import nullcontext
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -20,9 +22,11 @@ from .media import font
 from .processing import ffmpeg, probe
 from .project import Project
 from .storage import lock, read_json, sha256, write_json
+from .subtitles import subtitle_cues, timed_parts
 from .video_glow import glow_image, glow_opacity, glow_track, speaking_intervals
 
-SUBTITLE_COLORS = {"p1": "#70BAFF", "p2": "#FFB266"}
+SUBTITLE_COLORS = {"p1": "#FFB266", "p2": "#70BAFF"}
+SUBTITLE_STYLE = "white-speaker-outline-paged-v4"
 VIDEO_PIPELINE_VERSION = 4
 
 
@@ -55,7 +59,7 @@ class CoverOptions(BaseModel):
     title: str = Field(default="", max_length=120)
     subtitle: str = Field(default="", max_length=200)
     font_size: int = Field(default=88, ge=24, le=160)
-    title_y: float = Field(default=0.12, ge=0, le=0.85, allow_inf_nan=False)
+    title_y: float = Field(default=0.2, ge=0, le=0.85, allow_inf_nan=False)
     color: str = Field(default="#FFFFFF", pattern=r"^#[a-fA-F0-9]{6}$")
     shade: float = Field(default=0.25, ge=0, le=0.85, allow_inf_nan=False)
     show_overlays: bool = True
@@ -71,8 +75,83 @@ class VideoOptions(BaseModel):
     image_seconds: float = Field(default=5, ge=0.5, le=60, allow_inf_nan=False)
 
 
+class ClipEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    asset_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    start: float = Field(default=0, ge=0, allow_inf_nan=False)
+    end: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    speed: float = Field(default=1, ge=0.25, le=4, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def valid_interval(self):
+        if self.end is not None and self.end - self.start < 0.04:
+            raise ValueError("片段结束时间必须至少晚于开始时间 0.04 秒")
+        return self
+
+
+def exported_video(project: Project) -> tuple[str, dict] | None:
+    '当前成片文件名与元数据；旧工程仍可能是 final.mp4。'
+    meta = read_json(project.root / 'exports/video.json', {})
+    for name, record in meta.get('files', {}).items():
+        if name.endswith('.mp4'):
+            return name, meta
+    return None
+
+
+def video_filename(project: Project, config: dict | None = None) -> str:
+    '下载名跟随视频主标题，标题为空时退回工程名。'
+    config = config or video_config(project)
+    cover = config['cover']['options']
+    title = (cover['title'] or project.script().meta.topic or project.name).strip()
+    cleaned = re.sub(r'[^\w\u4e00-\u9fff.-]+', '_', title).strip('._')
+    return (cleaned[:80] or project.name) + '.mp4'
+
+
+def default_clip(asset: dict) -> dict:
+    return {"id": asset["id"], "asset_id": asset["id"], "start": 0, "end": None, "speed": 1}
+
+
+def sequence(config: dict) -> list[dict]:
+    assets = {a["id"]: a for a in config["assets"]}
+    clips = config.get("clips", [default_clip(a) for a in config["assets"]])
+    result = []
+    for clip in clips:
+        asset = assets[clip["asset_id"]]
+        end = (
+            clip["end"]
+            if clip["end"] is not None
+            else (
+                config["options"]["image_seconds"]
+                if asset["kind"] == "image"
+                else asset["duration"]
+            )
+        )
+        result.append(
+            {
+                **asset,
+                "start": clip["start"],
+                "speed": clip["speed"],
+                "length": (end - clip["start"]) / clip["speed"],
+            }
+        )
+    return result
+
+
+@lru_cache(maxsize=512)
+def cached_asset_hash(path: Path, size: int, modified: int, changed: int) -> str:
+    return sha256(path)
+
+
+def asset_hash(project: Project, asset: dict) -> str:
+    path = asset_path(project, asset)
+    stat = path.stat()
+    return cached_asset_hash(path, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
 class VideoEdit(VideoOptions):
     asset_ids: list[str] = Field(default_factory=list, max_length=100)
+    clips: list[ClipEdit] | None = Field(default=None, max_length=200)
     overlays: list[OverlayEdit] | None = Field(default=None, max_length=12)
     cover: CoverOptions | None = None
 
@@ -83,9 +162,20 @@ class VideoPaused(RuntimeError):
 
 def video_config(project: Project) -> dict:
     config = read_json(project.root / "video.json", {})
+    assets = []
+    for original in config.get("assets", []):
+        asset = {key: value for key, value in original.items() if key != "preview_path"}
+        preview = project.root / "assets" / "previews" / f"{asset['id']}.mp4"
+        if (
+            preview.is_file()
+            and preview.stat().st_mtime_ns >= asset_path(project, asset).stat().st_mtime_ns
+        ):
+            asset["preview_path"] = str(preview.relative_to(project.root))
+        assets.append(asset)
     return {
         "options": VideoOptions.model_validate(config.get("options", {})).model_dump(),
-        "assets": config.get("assets", []),
+        "assets": assets,
+        "clips": config.get("clips", [default_clip(a) for a in config.get("assets", [])]),
         "overlays": [
             {
                 **layer,
@@ -134,7 +224,13 @@ def validate_asset(path: Path, suffix: str) -> dict:
             raise ValueError("视频没有可用画面或时长")
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
         raise ValueError("视频素材无法读取") from exc
-    return {"kind": "video", "duration": duration}
+    return {
+        "kind": "video",
+        "duration": duration,
+        "width": streams[0]["width"],
+        "height": streams[0]["height"],
+        "codec": streams[0].get("codec_name", ""),
+    }
 
 
 def video_signature(project: Project, config: dict | None = None) -> str:
@@ -147,11 +243,15 @@ def video_signature(project: Project, config: dict | None = None) -> str:
         if config["overlays"]
         else 2,
         "subtitle_colors": SUBTITLE_COLORS,
+        "subtitle_style": SUBTITLE_STYLE,
         "audio": audio.get("signature"),
         "audio_files": {k: v["sha256"] for k, v in audio.get("files", {}).items()},
         "options": config["options"],
-        "assets": [(a["id"], sha256(asset_path(project, a))) for a in config["assets"]],
+        "assets": [(a["id"], asset_hash(project, a)) for a in sequence(config)],
     }
+    defaults = [default_clip(a) for a in config["assets"]]
+    if config.get("clips", defaults) != defaults:
+        data["clips"] = config["clips"]
     if config["overlays"]:
         data["overlays"] = [
             {**render_layer(a), "sha256": sha256(asset_path(project, a))}
@@ -220,8 +320,26 @@ def edit_config(config: dict, body: VideoEdit) -> dict:
         key not in assets for key in body.asset_ids
     ):
         raise ValueError("素材顺序包含重复或不存在的素材")
+    if body.clips is not None:
+        ids = [clip.id for clip in body.clips]
+        if len(ids) != len(set(ids)):
+            raise ValueError("片段 ID 重复")
+        for clip in body.clips:
+            if clip.asset_id not in body.asset_ids:
+                raise ValueError("片段引用了不存在的素材")
+            asset = assets[clip.asset_id]
+            if asset["kind"] == "video":
+                end = clip.end if clip.end is not None else asset["duration"]
+                if end > asset["duration"] + 0.001 or end - clip.start < 0.04:
+                    raise ValueError("片段起止时间超出原视频范围或片段过短")
+            elif clip.start != 0 or clip.speed != 1 or (clip.end is not None and clip.end > 60):
+                raise ValueError("图片仅支持设置 0.04–60 秒的展示时长")
+        config["clips"] = [clip.model_dump() for clip in body.clips]
+    else:
+        # Older clients retain their whole-asset ordering behavior.
+        config["clips"] = [default_clip(assets[key]) for key in body.asset_ids]
     config["assets"] = [assets[key] for key in body.asset_ids]
-    config["options"] = body.model_dump(exclude={"asset_ids", "overlays", "cover"})
+    config["options"] = body.model_dump(exclude={"asset_ids", "clips", "overlays", "cover"})
     if body.overlays is not None:
         layers = {asset["id"]: asset for asset in config["overlays"]}
         ids = [layer.id for layer in body.overlays]
@@ -256,14 +374,11 @@ def overlay_image(project: Project, layer: dict, options: VideoOptions):
 def background_frame(project: Project, config: dict, second: float) -> Image.Image:
     """Use the same clip durations, loop and center crop as the video compositor."""
     options = VideoOptions.model_validate(config["options"])
-    assets = config["assets"]
+    assets = sequence(config)
     if not assets:
         return Image.new("RGB", (options.width, options.height), "#18263e")
     duration = read_json(project.root / "exports/audio.json", {}).get("duration", 86400)
-    lengths = [
-        min(duration, options.image_seconds if a["kind"] == "image" else a["duration"])
-        for a in assets
-    ]
+    lengths = [min(duration, a["length"]) for a in assets]
     cursor = second % sum(lengths)
     chosen = assets[-1]
     for asset, length in zip(assets, lengths):
@@ -281,7 +396,7 @@ def background_frame(project: Project, config: dict, second: float) -> Image.Ima
         ffmpeg(
             [
                 "-ss",
-                cursor,
+                chosen["start"] + cursor * chosen["speed"],
                 "-i",
                 path,
                 "-frames:v",
@@ -375,7 +490,8 @@ def cover_signature(project: Project, config: dict | None = None) -> str:
         "image_seconds": config["options"]["image_seconds"],
         "options": cover["options"],
         "image": sha256(asset_path(project, cover["image"])) if cover["image"] else None,
-        "assets": [(a["id"], sha256(asset_path(project, a))) for a in config["assets"]],
+        "assets": [(a["id"], asset_hash(project, a)) for a in sequence(config)],
+        "clips": config.get("clips", [default_clip(a) for a in config["assets"]]),
         "overlays": [
             {**render_layer(a), "sha256": sha256(asset_path(project, a))}
             for a in config["overlays"]
@@ -521,23 +637,18 @@ def subtitle_track(
     padding = max(8, round(size * 0.45))
     side_margin = round(width * 0.08)
     text_width = width - 2 * (side_margin + padding)
-    bottom_margin = round(options.height * (0.15 if options.height > width else 0.08))
-    panel_height = line_height * 2 + padding * 2
-    height = panel_height + bottom_margin + 4
-    # Chunk long lines into readable pages inside each line's actual spoken interval.
+    bottom_margin = round(options.height * (0.17 if options.height > width else 0.10))
+    # Audio stays whole. Only subtitle text is paged, at a fixed readable font size.
     cues = []
+    draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
     for row in timeline["lines"]:
-        lines = subtitle_lines(
-            ImageDraw.Draw(Image.new("RGB", (1, 1))), row["words"], face, text_width
-        )
-        pages = [lines[i : i + 2] for i in range(0, len(lines), 2)]
-        weights = [sum(len(line) for line in page) for page in pages]
-        cursor = 0
-        for page, weight in zip(pages, weights):
-            start = row["start"] + row["duration"] * cursor / sum(weights)
-            cursor += weight
-            end = row["start"] + row["duration"] * cursor / sum(weights)
-            cues.append((start, end, page, row["slot"]))
+        for start, end, text in subtitle_cues(row):
+            lines = subtitle_lines(draw, text, face, text_width)
+            pages = [lines[i : i + 2] for i in range(0, len(lines), 2)]
+            for left, right, page in timed_parts(start, end, pages):
+                cues.append((left, right, page, row["slot"]))
+    block_height = line_height * 2 + padding * 2
+    height = block_height + bottom_margin + 4
     blank = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     blank.save(work / "blank.png")
     entries, cursor = [], 0.0
@@ -552,34 +663,30 @@ def subtitle_track(
         image = blank.copy()
         draw = ImageDraw.Draw(image)
         color = SUBTITLE_COLORS.get(slot, "#FFFFFF")
-        panel_bottom = height - bottom_margin
-        panel_top = panel_bottom - panel_height
-        draw.rounded_rectangle(
-            (side_margin, panel_top, width - side_margin, panel_bottom),
-            radius=round(size * 0.35),
-            fill=(8, 13, 23, 205),
-        )
-        draw.rounded_rectangle(
-            (
-                side_margin,
-                panel_top + padding,
-                side_margin + max(3, size // 12),
-                panel_bottom - padding,
-            ),
-            radius=2,
-            fill=color,
-        )
-        y = panel_top + (panel_height - len(lines) * line_height) / 2
+        block_bottom = height - bottom_margin
+        block_top = block_bottom - block_height
+        stroke = max(2, round(size / 14))
+        y = block_top + (block_height - len(lines) * line_height) / 2
         for line in lines:
             box = draw.textbbox((0, 0), line, font=face)
             x = (width - draw.textlength(line, font=face)) / 2
+            position = (x, y + (line_height - (box[3] - box[1])) / 2 - box[1])
+            # A fine dark outer edge keeps the colored outline readable on bright footage.
             draw.text(
-                (x, y + (line_height - (box[3] - box[1])) / 2 - box[1]),
+                position,
                 line,
                 font=face,
-                fill=color,
-                stroke_width=max(1, size // 24),
+                fill="#FFFFFF",
+                stroke_width=stroke + 1,
                 stroke_fill=(0, 0, 0, 220),
+            )
+            draw.text(
+                position,
+                line,
+                font=face,
+                fill="#FFFFFF",
+                stroke_width=stroke,
+                stroke_fill=color,
             )
             y += line_height
         name = f"subtitle-{i:05}.png"
@@ -634,9 +741,10 @@ def render_video(project: Project, cancelled=lambda: False, progress=lambda **kw
 
         try:
             checkpoint()
-            total = len(config["assets"])
+            selected = sequence(config)
+            total = len(selected)
             clips = []
-            for i, asset in enumerate(config["assets"]):
+            for i, asset in enumerate(selected):
                 progress(
                     stage=f"正在处理素材 {i + 1}/{total}：{asset['name']}",
                     kind="assets",
@@ -647,11 +755,13 @@ def render_video(project: Project, cancelled=lambda: False, progress=lambda **kw
                 source = asset_path(project, asset)
                 path = work / f"clip-{i:04}.mp4"
                 inputs = (
-                    ["-loop", "1", "-i", source] if asset["kind"] == "image" else ["-i", source]
+                    ["-loop", "1", "-i", source]
+                    if asset["kind"] == "image"
+                    else ["-ss", asset["start"], "-i", source]
                 )
                 seconds = min(
                     duration,
-                    options.image_seconds if asset["kind"] == "image" else asset["duration"],
+                    asset["length"],
                 )
                 ffmpeg(
                     [
@@ -660,6 +770,7 @@ def render_video(project: Project, cancelled=lambda: False, progress=lambda **kw
                         seconds,
                         "-an",
                         "-vf",
+                        f"setpts=(PTS-STARTPTS)/{asset['speed']},"
                         f"scale={options.width}:{options.height}:force_original_aspect_ratio=increase,"
                         f"crop={options.width}:{options.height},setsar=1,fps={options.fps}",
                         "-c:v",
@@ -691,6 +802,12 @@ def render_video(project: Project, cancelled=lambda: False, progress=lambda **kw
             master = project.root / "exports" / audio["files"]["master.wav"]["path"]
             subtitles = project.root / "exports" / audio["files"]["subtitles.srt"]["path"]
             timeline = read_json(project.root / "exports" / audio["files"]["timeline.json"]["path"])
+            script_lines = {line.id: line.words for line in project.script().lines}
+            for row in timeline["lines"]:
+                if row.get("line_ids"):
+                    row["subtitle_texts"] = [
+                        script_lines[key] for key in row["line_ids"] if key in script_lines
+                    ]
             inputs += ["-i", master]
             filters, current_stream, input_index = [], "0:v", 2
             for i, layer in enumerate(config["overlays"]):
@@ -753,7 +870,7 @@ def render_video(project: Project, cancelled=lambda: False, progress=lambda **kw
             ]
             progress(stage="正在合成画面、完整音频与字幕", kind="stage")
             checkpoint()
-            final = work / "final.mp4"
+            final = work / video_filename(project, config)
             ffmpeg(
                 [
                     *inputs,
@@ -799,6 +916,7 @@ def render_video(project: Project, cancelled=lambda: False, progress=lambda **kw
                     **config,
                     "audio_signature": audio["signature"],
                     "subtitle_colors": SUBTITLE_COLORS,
+                    "subtitle_style": SUBTITLE_STYLE,
                     "pipeline_version": VIDEO_PIPELINE_VERSION,
                 },
             )
@@ -809,7 +927,7 @@ def render_video(project: Project, cancelled=lambda: False, progress=lambda **kw
                     "sha256": sha256(work / name),
                     "bytes": (work / name).stat().st_size,
                 }
-                for name in ["final.mp4", "subtitles.srt", "video-inputs.json"]
+                for name in [final.name, "subtitles.srt", "video-inputs.json"]
             }
             meta = {
                 "version": 1,

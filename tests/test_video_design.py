@@ -1,12 +1,10 @@
 import io
-import zipfile
 
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
 
 from speakvideo.audio import audio_current, build_audio
-from speakvideo.delivery import build_delivery, delivery_current
 from speakvideo.jobs import synthesize
 from speakvideo.processing import ffmpeg
 from speakvideo.storage import read_json
@@ -66,7 +64,7 @@ def test_alpha_timed_layers_and_cover_only_changes_preserve_video_and_audio(proj
         request["cover"].update(enabled=True, frame_second=1, shade=0, title="")
         assert client.put("/api/projects/test/video", json=request).status_code == 200
         meta = render_video(project)
-        path = project.root / "exports" / meta["files"]["final.mp4"]["path"]
+        path = project.root / "exports" / next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
         # Transparent corners retain the background; the opaque middle appears only in its interval.
         assert pixel(project, path, 1, 10, 10)[2] > 110
         before = pixel(project, path, 0.1, 90, 90)
@@ -107,12 +105,6 @@ def test_alpha_timed_layers_and_cover_only_changes_preserve_video_and_audio(proj
         assert (project.root / "exports/video.json").read_bytes() == original_video
         assert (project.root / "exports/audio.json").read_bytes() == original_audio
         project.approve("video")
-        delivery = build_delivery(project)
-        with zipfile.ZipFile(
-            project.root / "exports" / delivery["files"]["delivery.zip"]["path"]
-        ) as archive:
-            assert {"cover/cover.png", "cover/cover.jpg"}.issubset(archive.namelist())
-        assert delivery_current(project)
 
 
 def test_design_api_validates_images_ids_intervals_and_keeps_old_settings(project):

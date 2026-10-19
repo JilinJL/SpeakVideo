@@ -6,6 +6,7 @@ from .audio import audio_current, build_audio, mix_options
 from .jobs import report, synthesize
 from .project import Project
 from .script.engine import LLMCancelled, LLMHooks, OpenAICompatibleProvider, ScriptEngine
+from .script.prompts import global_prompts
 from .storage import lock, read_json, write_json
 
 
@@ -13,6 +14,7 @@ def engine(project: Project, hooks: LLMHooks | None = None):
     return ScriptEngine(
         OpenAICompatibleProvider(project.settings.llm, hooks),
         project.settings.script.max_line_chars,
+        global_prompts(project.settings.paths.root),
     )
 
 
@@ -30,7 +32,6 @@ def generate_brief(project: Project, hooks: LLMHooks | None = None):
             script.meta.keywords,
             script.meta.guidance,
             cast=script.cast,
-            prompts=script.meta.prompts,
         )
         _keep(hooks)
         project.save(script, project.cast())
@@ -62,7 +63,6 @@ def generate_script(project: Project, hooks: LLMHooks | None = None):
             old.meta.brief,
             old.meta.guidance,
             cast=old.cast,
-            prompts=old.meta.prompts,
         )
         _keep(hooks)
         if old.lines:
@@ -90,6 +90,8 @@ def advance(
     progress=lambda **kwargs: None,
     include_video: bool = False,
     llm=lambda kind: None,
+    concurrency: int | None = None,
+    stop_before_merge: bool = False,
 ) -> str:
     if not project.script().lines:
         if not project.script().meta.brief:
@@ -107,7 +109,7 @@ def advance(
     if not checks["ok"]:
         raise ValueError("预检失败：" + "；".join(checks["errors"]))
     progress(stage="正在按连续角色分组合成配音", kind="lines")
-    manifest = synthesize(project, cancelled=cancelled)
+    manifest = synthesize(project, cancelled=cancelled, concurrency=concurrency)
     if cancelled() or manifest["status"] == "paused":
         return "paused"
     options = mix_options(project, bgm, bgm_volume)
@@ -116,15 +118,15 @@ def advance(
             return "audio_review"
         if not include_video:
             return "complete"
-        from .delivery import build_delivery
         from .video import render_video, video_current
 
         if not video_current(project):
             render_video(project, cancelled=cancelled, progress=progress)
         if not project.approved("video"):
             return "video_review"
-        build_delivery(project, cancelled=cancelled, progress=progress)
-        return "delivery_ready"
+        return "complete"
+    if stop_before_merge:
+        return "segments_review"
     progress(stage="正在合并音频、混音并生成字幕", kind="stage")
     build_audio(project, bgm=bgm, bgm_volume=bgm_volume, cancelled=cancelled)
     return "audio_review"

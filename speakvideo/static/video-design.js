@@ -3,14 +3,14 @@
 let designMode = 'overlay', selectedOverlay = '', designProject = '';
 let coverPreviewTimer = null, coverPreviewAbort = null, coverPreviewURL = '', coverPreviewRevision = 0;
 const overlayKeys = ['id', 'x', 'y', 'width', 'opacity', 'flip', 'start', 'end', 'speaker_slot', 'speaking_glow', 'glow_strength'];
-let designAnimation = 0, designIntervals = {};
+let designIntervals = {};
 const clampDesign = (value, min, max) => Math.max(min, Math.min(max, value));
 
 function coverFields() {
   return {
-    enabled: $('coverEnabled').checked,
+    enabled: true,
     background: $('coverBackground').value,
-    frame_second: Number($('coverSecond').value),
+    frame_second: 0,
     title: $('coverTitle').value,
     subtitle: $('coverSubtitle').value,
     font_size: Number($('coverFontSize').value),
@@ -29,6 +29,7 @@ function videoBody() {
     image_seconds: Number($('videoImageSeconds').value),
     burn_subtitles: $('videoBurnSubtitles').checked,
     asset_ids: data.video.assets.map(a => a.id),
+    clips: data.video.clips,
     overlays: (data.video.overlays || []).map(layer => Object.fromEntries(overlayKeys.map(key => [key, layer[key]]))),
     cover: coverFields(),
   };
@@ -38,16 +39,13 @@ function invalidateDesign() {
   videoDirty = true; markDirty();
   $('coverState').textContent = '修改未导出';
   $('approveVideo').disabled = true;
-  document.querySelector('[data-action="package"]').disabled = true;
   scheduleCoverPreview();
 }
 
 function renderDesign() {
   data.video.overlays ||= [];
   if (designProject !== current) {
-    stopDesignPlayback();
     designProject = current; selectedOverlay = ''; designMode = 'overlay';
-    $('designSecond').value = 0;
     coverPreviewAbort?.abort(); coverPreviewRevision++;
     if (coverPreviewURL) URL.revokeObjectURL(coverPreviewURL);
     coverPreviewURL = ''; $('coverDesignPreview').removeAttribute('src');
@@ -63,15 +61,9 @@ function renderDesign() {
   }
   const master = data.audio_current && data.audio_export?.files?.['master.wav'];
   const source = master ? url('/files/exports/' + master.path) : '';
-  if ($('designAudio').getAttribute('src') !== source) {
-    stopDesignPlayback();
-    if (source) $('designAudio').src = source;
-    else { $('designAudio').removeAttribute('src'); $('designAudio').load(); }
-  }
   const options = data.video.cover.options;
-  const fields = {coverBackground: 'background', coverSecond: 'frame_second', coverTitle: 'title', coverSubtitle: 'subtitle', coverFontSize: 'font_size', coverColor: 'color'};
+  const fields = {coverBackground: 'background', coverTitle: 'title', coverSubtitle: 'subtitle', coverFontSize: 'font_size', coverColor: 'color'};
   for (const [id, key] of Object.entries(fields)) $(id).value = options[key];
-  $('coverEnabled').checked = options.enabled;
   $('coverShowOverlays').checked = options.show_overlays;
   $('coverY').value = options.title_y * 100;
   $('coverShade').value = options.shade * 100;
@@ -90,20 +82,13 @@ function updateCoverOutputs() {
 }
 
 function setDesignMode(mode) {
-  if (mode === 'cover') stopDesignPlayback();
   designMode = mode;
   $('editOverlayTab').setAttribute('aria-pressed', String(mode === 'overlay'));
   $('editCoverTab').setAttribute('aria-pressed', String(mode === 'cover'));
-  $('designHint').textContent = mode === 'cover'
-    ? '这是实际导出的封面预览。调整左侧标题与底图，预览会自动更新。'
-    : '上传角色透明 PNG，拖动位置与大小，绑定说话角色。点击播放发言预览，检查谁说话谁泛光。';
-  $('playDesignAudio').disabled = mode === 'cover' || !data.audio_current || $('video').classList.contains('design-busy');
-  $('designSecond').disabled = mode === 'cover';
   $('coverDesignPreview').hidden = mode !== 'cover';
   $('designLayers').hidden = mode === 'cover';
   renderDesignScene();
   if (mode === 'cover') scheduleCoverPreview();
-  else $('designPreviewState').textContent = data.audio_current ? '发言高光预览' : '先合并完整音频，再预览发言高光';
 }
 
 function overlayGeometry(layer) {
@@ -118,7 +103,7 @@ function overlayGeometry(layer) {
 function selectedLayer() { return data?.video.overlays.find(layer => layer.id === selectedOverlay); }
 
 function paintLayer(element, layer) {
-  const geometry = overlayGeometry(layer), second = Number($('designSecond').value);
+  const geometry = overlayGeometry(layer), second = 0;
   Object.assign(element.style, {
     left: `${geometry.x * 100}%`, top: `${geometry.y * 100}%`,
     width: `${geometry.width * 100}%`, height: `${geometry.height * 100}%`,
@@ -139,31 +124,29 @@ function paintLayer(element, layer) {
       }
     }
   }
-  const color = config.subtitle_colors?.[layer.speaker_slot] || (layer.speaker_slot === 'p1' ? '#70BAFF' : '#FFB266');
+  const color = config.subtitle_colors?.[layer.speaker_slot] || (layer.speaker_slot === 'p1' ? '#FFB266' : '#70BAFF');
   const rgb = [1, 3, 5].map(start => parseInt(color.slice(start, start + 2), 16)).join(',');
   const radius = Math.max(2, Math.min(24, Math.round(Math.min(element.offsetWidth, element.offsetHeight) * .04)));
   image.style.filter = amount > 0 ? `drop-shadow(0 0 ${radius / 3}px rgba(${rgb},${amount})) drop-shadow(0 0 ${radius}px rgba(${rgb},${amount}))` : '';
 }
 
 function syncDesignBackground() {
-  const assets = data.video.assets;
+  const assets = footageSequence();
   const duration = data.audio_export?.duration || 86400;
-  const lengths = assets.map(a => Math.min(duration, a.kind === 'image' ? Number($('videoImageSeconds').value) : a.duration));
-  let cursor = Math.max(0, Number($('designSecond').value)) % (lengths.reduce((sum, n) => sum + n, 0) || 1);
-  let asset = null;
-  for (let i = 0; i < assets.length; i++) { asset = assets[i]; if (cursor < lengths[i]) break; cursor -= lengths[i]; }
+  const lengths = assets.map(a => Math.min(duration, a.length));
+  let asset = assets[0] || null;
+  for (const [i, length] of lengths.entries()) if (length > 0) { asset = assets[i]; break; }
   const image = $('designBackgroundImage'), video = $('designBackgroundVideo');
   image.hidden = asset?.kind !== 'image'; video.hidden = asset?.kind !== 'video';
-  const playing = !$('designAudio').paused;
-  if (!playing) video.pause();
+  video.pause();
   if (asset) {
-    const source = url('/files/' + asset.path);
+    const source = url('/files/' + (asset.preview_path || asset.path));
     if (asset.kind === 'image') { if (image.getAttribute('src') !== source) image.src = source; }
     else {
       const seek = () => {
-        const target = Math.min(cursor, Math.max(0, video.duration - .04));
-        if (Number.isFinite(video.duration) && (!playing || Math.abs(video.currentTime - target) > .15)) video.currentTime = target;
-        if (playing) video.play().catch(() => {});
+        video.playbackRate = asset.speed;
+        const target = Math.min(asset.start + cursor * asset.speed, Math.max(0, video.duration - .04));
+        if (Number.isFinite(video.duration) && Math.abs(video.currentTime - target) > .15) video.currentTime = target;
       };
       if (video.getAttribute('src') !== source) { video.onloadedmetadata = seek; video.src = source; }
       else seek();
@@ -176,7 +159,6 @@ function renderDesignScene() {
   const [width, height] = $('videoSize').value.split('x').map(Number);
   $('designStage').style.aspectRatio = `${width}/${height}`;
   $('designStage').style.maxWidth = height > width ? '350px' : '640px';
-  $('designSubtitleGuide').hidden = designMode === 'cover' || !$('videoBurnSubtitles').checked;
   syncDesignBackground();
   $('designLayers').innerHTML = data.video.overlays.map(layer => `<div class="design-layer" data-layer="${layer.id}" role="button" tabindex="0" aria-label="拖动贴图 ${escape(layer.name)}"><img src="${url('/files/' + layer.path)}" alt="${escape(layer.name)}" draggable="false"><span class="design-resize" aria-label="调整贴图大小"></span></div>`).join('');
   $$('[data-layer]').forEach(element => {
@@ -195,19 +177,6 @@ function renderDesignScene() {
   });
 }
 
-function stopDesignPlayback() {
-  cancelAnimationFrame(designAnimation); designAnimation = 0;
-  $('designAudio').pause(); $('designBackgroundVideo').pause();
-  $('playDesignAudio').textContent = '播放发言预览';
-}
-
-function animateDesignPlayback() {
-  if ($('designAudio').paused || designMode !== 'overlay' || $('video').hidden) { stopDesignPlayback(); return; }
-  $('designSecond').value = $('designAudio').currentTime.toFixed(2);
-  syncDesignBackground();
-  $$('[data-layer]').forEach(element => paintLayer(element, data.video.overlays.find(layer => layer.id === element.dataset.layer)));
-  designAnimation = requestAnimationFrame(animateDesignPlayback);
-}
 
 function startDesignDrag(event, element, layer) {
   if (event.button !== 0 || $('video').classList.contains('design-busy')) return;
@@ -248,7 +217,7 @@ function renderOverlayControls() {
     overlayStart: layer.start, overlayEnd: layer.end ?? ''})) $(id).value = typeof value === 'number' ? Math.round(value * 10) / 10 : value;
   $('overlayFlip').checked = layer.flip;
   $('overlaySpeaker').value = layer.speaker_slot;
-  for (const slot of ['p1', 'p2']) $('overlaySpeaker').querySelector(`[value="${slot}"]`).textContent = `${data.cast[slot]?.role || slot} · ${slot === 'p1' ? '蓝色' : '橙色'}高光`;
+  for (const slot of ['p1', 'p2']) $('overlaySpeaker').querySelector(`[value="${slot}"]`).textContent = `${data.cast[slot]?.role || slot} · ${slot === 'p1' ? '橙色' : '蓝色'}高光`;
   $('overlaySpeakingGlow').checked = layer.speaking_glow;
   $('overlayGlowStrength').value = Math.round(layer.glow_strength * 100);
   $('overlayGlowOut').textContent = `${Math.round(layer.glow_strength * 100)}%`;
@@ -294,7 +263,6 @@ async function uploadDesign(kind, input) {
   videoUploading = true; renderTasks();
   try {
     for (let i = 0; i < files.length; i++) {
-      $('designPreviewState').textContent = `上传 ${i + 1}/${files.length}：${files[i].name}`;
       const form = new FormData(); form.append('file', files[i]);
       const result = await api(`/api/projects/${encodeURIComponent(name)}/assets/${kind}`, 'POST', form);
       if (name === current) { data.video = result; if (kind === 'overlay') selectedOverlay = result.overlays.at(-1).id; }
@@ -312,29 +280,9 @@ function initVideoDesign() {
   $('video').replaceChildren(left, right);
   $('editOverlayTab').onclick = () => setDesignMode('overlay');
   $('editCoverTab').onclick = $('previewCover').onclick = () => setDesignMode('cover');
-  $('designSecond').oninput = () => {
-    stopDesignPlayback();
-    if (data.audio_current && Number.isFinite($('designAudio').duration)) $('designAudio').currentTime = clampDesign(Number($('designSecond').value), 0, $('designAudio').duration);
-    renderDesignScene();
-  };
-  $('playDesignAudio').onclick = () => safe(async () => {
-    const audio = $('designAudio');
-    if (!audio.paused) { stopDesignPlayback(); return; }
-    if (!data.audio_current) return;
-    $('masterAudio').pause(); $('finalVideo').pause();
-    const duration = data.audio_export.duration;
-    audio.currentTime = Number($('designSecond').value) >= duration ? 0 : Math.max(0, Number($('designSecond').value));
-    await audio.play(); $('playDesignAudio').textContent = '暂停发言预览';
-    animateDesignPlayback();
-  });
-  $('designAudio').onended = () => {
-    $('designSecond').value = $('designAudio').currentTime.toFixed(2);
-    stopDesignPlayback(); renderDesignScene();
-  };
-  new MutationObserver(() => { if ($('video').hidden) stopDesignPlayback(); }).observe($('video'), {attributes: true, attributeFilter: ['hidden']});
   $('overlayFiles').onchange = () => safe(() => uploadDesign('overlay', $('overlayFiles')));
   $('coverFile').onchange = () => safe(() => uploadDesign('cover', $('coverFile')));
-  for (const id of ['coverEnabled', 'coverBackground', 'coverSecond', 'coverTitle', 'coverSubtitle', 'coverFontSize', 'coverColor', 'coverY', 'coverShade', 'coverShowOverlays']) {
+  for (const id of ['coverBackground', 'coverTitle', 'coverSubtitle', 'coverFontSize', 'coverColor', 'coverY', 'coverShade', 'coverShowOverlays']) {
     $(id).oninput = () => { updateCoverOutputs(); invalidateDesign(); };
   }
   for (const id of ['overlayX', 'overlayY', 'overlayWidth', 'overlayOpacity', 'overlayStart', 'overlayEnd', 'overlayFlip', 'overlaySpeaker', 'overlaySpeakingGlow', 'overlayGlowStrength']) {

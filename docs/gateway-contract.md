@@ -2,7 +2,7 @@
 
 此契约由 `gateway/` Go 服务和 `worker/` Windows 扩展实现。现网 HTTPS 地址为 `https://tts.example.com`，worker 为 `example-worker`。网关只做鉴权与内存转发，作业元数据与 `.pt` 副本由 Windows agent 管理。接入需 `tts.mode="gateway"`、Client Token 与 `worker_id`，不只是修改 `base_url`。
 
-所有客户端接口使用 HTTPS、`Authorization: Bearer <CLIENT_TOKEN>` 和 `X-Worker-ID: example-worker`，错误使用非 2xx + JSON `detail`。Worker Token 独立，只能连接 WSS worker 路由。所有音频响应为有效 PCM WAV，TTS 采样率 24000。普通请求体上限 32MiB，PT 管理 JSON 上限 48MiB（原始 PT ≤32MiB，base64 约 43MiB）；nginx 上限 48MiB。WAV 上限 64MiB，最多八个并发 HTTP 请求；单 GPU 串行。
+所有客户端接口使用 HTTPS、`Authorization: Bearer <CLIENT_TOKEN>` 和 `X-Worker-ID: example-worker`，错误使用非 2xx + JSON `detail`。Worker Token 独立，只能连接 WSS worker 路由。所有音频响应为有效 PCM WAV，TTS 采样率 24000。普通请求体上限 32MiB，PT 管理 JSON 上限 48MiB（原始 PT ≤32MiB，base64 约 43MiB）；nginx 上限 48MiB。WAV 上限 64MiB，最多八个并发 HTTP 请求。2026-10-15 现网 Windows 已支持聚合最多 6 个配音作业进行批量推理。
 
 ## 健康与音色
 
@@ -64,7 +64,9 @@ Mac 在 POST 前保存幂等键、POST 后保存 job ID，再开始轮询。断�
 
 网关重启不丢 Windows 作业；WSS 自动重连后 `job.query` 从 Windows 查询状态与内存音频。Windows agent 重启时，旧 queued/running/succeeded 元数据统一标为失败 `worker_restarted_result_lost`，重复提交旧键也不会重复入队。音频缓存淘汰返回 `audio_cache_evicted`，须 Mac 显式重试。已下载到 Mac 的有效 WAV 不受影响。
 
-Mac 的暂停停止继续提交与轮询，不调用 cancel。Windows 队列串行，独占 agent 进程锁；Qwen 自身仍使用 inference_lock，音色同步 / 创建 / 设计与配音共用 asset_lock。推理前再次核验实际 `.pt` 的 `voice_sha256`。
+Mac 的暂停停止继续提交与轮询，不调用 cancel，保留所有在途 job ID。现网 Windows 可将相邻到达的最多 6 个配音任务聚合为一次 `/api/tts/batch`；Mac 使用有界并发窗口发送独立 `POST /v1/tts/jobs`，无需直连 Windows 8001 或更改 WSS protocol 1。每组独立保存幂等键和 job ID、查询结果，返回顺序不影响台词顺序。已确认失败的组重试时创建新代次，网络状态未知时继续查询原任务。
+
+项目任务仍按队列执行；每次配音任务内部允许 1–6 组同时生成。Mac 保留工程锁 / GPU 队列锁，避免多个工程各自打开 6 组窗口。Windows 资产管理仍负责互斥与推理前 PT 哈希复核。本次只更新 Mac，不用仓库中的旧 `worker/` 扩展覆盖已经升级的 Windows Agent。
 
 ## WSS 协议适配
 

@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from ..config import LLMSettings
 from .prompts import (
+    BRIEF_OUTPUT_CONTRACT,
     DEFAULT_BRIEF_PROMPT,
     DEFAULT_PERSONAS,
     DEFAULT_STRUCTURE_PROMPT,
@@ -350,11 +351,14 @@ class OpenAICompatibleProvider:
 
 
 class ScriptEngine:
-    def __init__(self, provider: LLMProvider, max_line_chars: int = 200):
+    def __init__(
+        self, provider: LLMProvider, max_line_chars: int = 200, prompts: ScriptPrompts | None = None
+    ):
         if not 3 <= max_line_chars <= 200:
             raise ValueError("单行台词上限必须为 3–200 字")
         self.provider = provider
         self.max_line_chars = max_line_chars
+        self.prompts = (prompts or ScriptPrompts()).model_copy(deep=True)
 
     def brief(
         self,
@@ -366,12 +370,14 @@ class ScriptEngine:
         prompts: ScriptPrompts | None = None,
     ) -> str:
         personas = cast if cast is not None else self.default_cast()
-        prompts = prompts or ScriptPrompts()
+        prompts = prompts or self.prompts
         return question_particles(
             self.provider.complete(
                 (prompts.brief.strip() or DEFAULT_BRIEF_PROMPT)
                 + "\n\n"
-                + DIALOGUE_QUALITY_CONTRACT,
+                + DIALOGUE_QUALITY_CONTRACT
+                + "\n\n"
+                + BRIEF_OUTPUT_CONTRACT,
                 json.dumps(
                     {
                         "topic": topic,
@@ -394,7 +400,7 @@ class ScriptEngine:
         if not script.meta.brief.strip():
             raise ValueError("请先填写或生成草稿，再扩展对话")
         continuation = self.provider.complete(
-            (script.meta.prompts.brief.strip() or DEFAULT_BRIEF_PROMPT)
+            (self.prompts.brief.strip() or DEFAULT_BRIEF_PROMPT)
             + "\n\n"
             + DIALOGUE_QUALITY_CONTRACT
             + "\n\n本次任务是扩展已有对话。保留已有内容，由程序追加你的输出。"
@@ -430,7 +436,7 @@ class ScriptEngine:
         personas = cast if cast is not None else self.default_cast()
         if len(personas) != 2 or {member.slot for member in personas} != {"p1", "p2"}:
             raise ValueError("duo_dialogue 需要 p1 与 p2")
-        prompts = prompts or ScriptPrompts()
+        prompts = prompts or self.prompts
         writing = prompts.structure.strip() or DEFAULT_STRUCTURE_PROMPT
         content = self.provider.complete(
             writing + "\n\n" + structure_contract(self.max_line_chars),
@@ -478,6 +484,5 @@ class ScriptEngine:
             raise ValueError("；".join(errors))
         script.meta.topic, script.meta.keywords = topic, keywords
         script.meta.brief, script.meta.guidance = brief, guidance
-        script.meta.prompts = prompts.model_copy(deep=True)
         script.cast = [member.model_copy(deep=True) for member in personas]
         return script

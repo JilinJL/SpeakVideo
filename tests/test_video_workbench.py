@@ -13,7 +13,6 @@ from speakvideo.media import font
 from speakvideo.processing import ffmpeg, probe
 from speakvideo.storage import read_json, write_json
 from speakvideo.video import (
-    SUBTITLE_COLORS,
     VideoOptions,
     VideoPaused,
     render_video,
@@ -56,7 +55,10 @@ def test_video_defaults_to_portrait_and_exposes_stable_speaker_colors(project):
     with TestClient(create_app(project.settings)) as client:
         options = client.get("/api/projects/test").json()["video"]["options"]
         assert (options["width"], options["height"]) == (1080, 1920)
-        assert client.get("/api/config").json()["subtitle_colors"] == SUBTITLE_COLORS
+        assert client.get("/api/config").json()["subtitle_colors"] == {
+            "p1": "#FFB266",
+            "p2": "#70BAFF",
+        }
 
 
 @pytest.mark.parametrize(
@@ -79,12 +81,12 @@ def test_subtitle_wrapping_keeps_punctuation_inside_safe_width(text):
         assert any("OpenAI" in line for line in lines)
 
 
-def test_real_portrait_video_has_blue_and_orange_subtitles_with_safe_margins(project):
+def test_real_portrait_video_has_white_subtitles_with_speaker_outlines_and_no_panel(project):
     config = prepare_video(project)
     config["options"].update(width=480, height=854, font_size=28)
     write_json(project.root / "video.json", config)
     meta = render_video(project)
-    path = project.root / "exports" / meta["files"]["final.mp4"]["path"]
+    path = project.root / "exports" / next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
     audio = read_json(project.root / "exports/audio.json")
     timeline = read_json(project.root / "exports" / audio["files"]["timeline.json"]["path"])
     pictures = [
@@ -92,8 +94,8 @@ def test_real_portrait_video_has_blue_and_orange_subtitles_with_safe_margins(pro
         for i, row in enumerate(timeline["lines"][:2])
     ]
     predicates = [
-        lambda r, g, b: b > 210 and b > r + 60 and g > r + 25,
         lambda r, g, b: r > 210 and r > b + 60 and g > b + 25,
+        lambda r, g, b: b > 210 and b > r + 60 and g > r + 25,
     ]
     for picture, matches in zip(pictures, predicates):
         points = [
@@ -103,6 +105,22 @@ def test_real_portrait_video_has_blue_and_orange_subtitles_with_safe_margins(pro
             if matches(*picture.getpixel((x, y)))
         ]
         assert len(points) > 50
+        assert (
+            sum(
+                min(picture.getpixel((x, y))) > 230
+                for y in range(picture.height)
+                for x in range(picture.width)
+            )
+            > 50
+        )
+        # The former panel and colored quote bar must leave only the background here.
+        background = picture.getpixel((0, 0))
+        edge = picture.crop((40, round(picture.height * 0.65), 43, round(picture.height * 0.85)))
+        assert all(
+            max(abs(a - b) for a, b in zip(edge.getpixel((x, y)), background)) < 8
+            for y in range(edge.height)
+            for x in range(edge.width)
+        )
         assert min(x for x, _ in points) >= picture.width * 0.075
         assert max(x for x, _ in points) <= picture.width * 0.925
         assert max(y for _, y in points) < picture.height * 0.86
@@ -116,7 +134,7 @@ def test_real_video_burns_chinese_subtitles_at_spoken_times_and_preserves_delive
     before_audio = (project.root / "exports/audio.json").read_bytes()
     stages = []
     meta = render_video(project, progress=lambda **kw: stages.append(kw["stage"]))
-    path = project.root / "exports" / meta["files"]["final.mp4"]["path"]
+    path = project.root / "exports" / next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
     info = probe(path)
     assert {s["codec_name"] for s in info["streams"]} >= {"h264", "aac", "mov_text"}
     assert float(info["format"]["duration"]) == pytest.approx(meta["duration"], abs=0.1)
@@ -137,7 +155,7 @@ def test_real_video_burns_chinese_subtitles_at_spoken_times_and_preserves_delive
     write_json(project.root / "video.json", config)
     assert not video_current(project)
     soft = render_video(project)
-    soft_path = project.root / "exports" / soft["files"]["final.mp4"]["path"]
+    soft_path = project.root / "exports" / next(v["path"] for n, v in soft["files"].items() if n.endswith(".mp4"))
     unburned = frame(soft_path, project.root / "unburned.png", 0.2)
     assert (
         sum(ImageStat.Stat(ImageChops.difference(paused.crop(lower), unburned.crop(lower))).mean)
@@ -215,13 +233,13 @@ def test_video_api_upload_sort_loop_render_and_guards(project):
         data = client.get("/api/projects/test").json()
         assert data["video_current"] and data["audio_current"]
         meta = data["video_export"]
-        path = project.root / "exports" / meta["files"]["final.mp4"]["path"]
+        path = project.root / "exports" / next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
         first = frame(path, project.root / "first.png", 0.1).getpixel((40, 40))
         second = frame(path, project.root / "second.png", 0.7).getpixel((40, 40))
         loop = frame(path, project.root / "loop.png", 1.25).getpixel((40, 40))
         assert first[2] > 200 and second[0] > 200 and loop[2] > 200
         download = client.get(
-            "/api/projects/test/files/exports/" + meta["files"]["final.mp4"]["path"]
+            "/api/projects/test/files/exports/" + next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
         )
         assert download.status_code == 200 and download.headers["content-type"] == "video/mp4"
         script = project.script()

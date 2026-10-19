@@ -219,14 +219,6 @@ def render(name: str):
 
 
 @app.command()
-def package(name: str):
-    """打包已确认的成片、音频、字幕与工程快照。"""
-    from .delivery import build_delivery
-
-    show(build_delivery(project(name)))
-
-
-@app.command()
 def run(
     topic: str,
     keywords: str = "",

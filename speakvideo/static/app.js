@@ -18,11 +18,15 @@ let homeProjects = [];
 let tasksPolling = false;
 
 const TABS = ['script', 'binding', 'production', 'video'];
-const TASK_LABELS = {brief: '写对话草稿', extend: '扩展对话', generate: '生成台词', synth: '合成配音', retry: '重试单行', merge: '合并导出', render: '合成视频', run: '完整音频工作流', design: '试音', create: '固化音色', sync: '刷新音色库', preview: '音色试听', llm_test: 'LLM 连接测试'};
+const TASK_LABELS = {brief: '写对话草稿', extend: '扩展对话', generate: '生成台词', synth: '合成配音', retry: '重试语音组', merge: '合并导出', render: '合成视频', run: '完整音频工作流', design: '试音', create: '固化音色', sync: '刷新音色库', preview: '音色试听', llm_test: 'LLM 连接测试'};
 const TASK_STATES = {queued: '排队中', running: '执行中', succeeded: '完成', failed: '失败', paused: '已暂停', interrupted: '被中断'};
-TASK_LABELS.package = '打包交付';
 TASK_LABELS.cover = '导出封面';
-const LINE_STATES = {succeeded: '已合成', failed: '失败', running: '合成中', pending: '待合成'};
+TASK_LABELS.preview_video = '视频兼容预览';
+TASK_LABELS.retry = '重新生成配音';
+TASK_LABELS.run = '生成到整组试听';
+const LINE_STATES = {succeeded: '可试听', failed: '失败', running: '生成中', queued: '排队中', pending: '待生成'};
+const selectedLines = new Set(), retrySubmitting = new Set();
+let playingLine = '', linePlayerLoading = false;
 
 const icon = name => `<svg class="ico" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const store = {
@@ -105,11 +109,11 @@ async function api(path, method = 'GET', body) {
 async function safe(fn) { try { return await fn(); } catch (error) { toast(error.message, true); } }
 async function queue(path, body) { const task = await api(path, 'POST', body); taskStatus.set(task.id, 'queued'); await pollTasks(); return task; }
 const url = suffix => `/api/projects/${encodeURIComponent(current)}${suffix}`;
-const speakerIndex = slot => Math.max(0, data.script.cast.findIndex(c => c.slot === slot)) % 4 + 1;
+const speakerIndex = slot => ({p1: 1, p2: 2}[slot] || 3);
 const speakerVar = slot => `--speaker: var(--s${speakerIndex(slot)})`;
 
 function setSaveState(text, isDirty = false) { $('saveState').textContent = text; $('saveState').classList.toggle('dirty', isDirty); }
-function markDirty() { dirty = true; setSaveState('未保存', true); renderSteps(); renderDraftTimeline(); }
+function markDirty() { dirty = true; setSaveState('未保存', true); renderSteps(); renderDraftTimeline(); updateLineReview(); }
 
 /* ───────── 左栏：工程与音色 ───────── */
 function renderProjects() {
@@ -188,7 +192,10 @@ function defaultTab() {
 async function selectProject(name, {keepTab = false, tab: preferredTab = null} = {}) {
   if (name !== current && dirty && !confirm('有未保存修改，仍要切换工程吗？')) return;
   const switching = name !== current;
-  current = name; data = await api(url('')); dirty = false;
+  if (switching) { selectedLines.clear(); stopLineAudio(); }
+  current = name;
+  [data, config.script_prompts] = await Promise.all([api(url('')), api('/api/script-prompts')]);
+  dirty = false;
   data.workflow ||= {}; data.workflow.approvals ||= {};
 
   $('welcome').hidden = true; $('workspace').hidden = false; $('steps').hidden = false; $('save').hidden = false;
@@ -205,8 +212,7 @@ async function selectProject(name, {keepTab = false, tab: preferredTab = null} =
     $('draftSettings').open = !$('brief').value.trim();
   }
   for (const key of ['brief', 'structure']) {
-    const custom = data.script.meta.prompts?.[key] || '';
-    $(`${key}Prompt`).value = custom.trim() ? custom : config.script_prompts[key];
+    $(`${key}Prompt`).value = config.script_prompts[key];
   }
   $('structureContract').value = config.script_json_contract;
   renderPromptState();
@@ -217,6 +223,8 @@ async function selectProject(name, {keepTab = false, tab: preferredTab = null} =
   $$('textarea', $('personas')).forEach(input => input.oninput = () => { data.script.cast.find(m => m.slot === input.dataset.persona).persona = input.value; markDirty(); });
 
   if (live && live.project !== current) stopFollowing();
+  $('synthesisConcurrency').value = data.synthesis?.concurrency || 1;
+  renderSynthesisConcurrency();
   renderLines(); renderBindings(); renderReport(data.preflight); renderMedia(); updateExports(); renderVideo(); renderLive();
   const requested = new URLSearchParams(location.search).get('tab');
   let tab = defaultTab();
@@ -230,6 +238,7 @@ async function selectProject(name, {keepTab = false, tab: preferredTab = null} =
 
 /* ───────── 步骤 ───────── */
 function switchTab(id) {
+  if (id !== 'video') $('footagePlayer').pause();
   activeTab = id;
   $$('.tab').forEach(e => e.hidden = e.id !== id);
   $('workspace').dataset.tab = id;
@@ -256,9 +265,135 @@ function growAll() { requestAnimationFrame(() => $$('.line textarea').forEach(au
 function autoGrow(el) {
   if (!el.offsetParent) return; el.style.height = 'auto'; el.style.height = el.scrollHeight + 2 + 'px'; }
 function lineStatus(id) {
+  if (retrySubmitting.has(id)) return 'queued';
+  const active = lastTasks.filter(t => t.project === current && activeTask(t.status) && t.line_ids?.includes(id));
+  const retry = active.find(t => t.label === 'retry');
+  const task = retry || active.find(t => t.label === 'synth');
+  if (task) {
+    if (task.status === 'queued') return 'queued';
+    if (task.progress?.running_ids?.includes(id)) return 'running';
+    if (task.progress?.completed_ids?.includes(id)) return 'succeeded';
+    if (retry || !data.preflight?.reusable_ids?.includes(id)) return 'queued';
+  }
   const status = data.manifest?.lines?.[id]?.status || 'pending';
   return status === 'succeeded' && data.preflight?.reusable_ids && !data.preflight.reusable_ids.includes(id) ? 'pending' : status;
 }
+
+function stopLineAudio() {
+  const player = $('linePlayer');
+  player.pause(); player.removeAttribute('src'); player.load();
+  playingLine = ''; linePlayerLoading = false; $('linePlayerDock').hidden = true;
+}
+function reviewGroups() {
+  if (!data) return [];
+  if (!dirty && data.speech_groups) return data.speech_groups;
+  const groups = [];
+  const joined = lines => lines.map((l, i) => l.words.trim() + (i < lines.length - 1 && l.words.trim() && !/[，。！？；：、,.!?;:…"'”’）)]$/.test(l.words.trim()) ? '。' : '')).join('');
+  const voice = line => { const binding = data.cast[line.slot]; return JSON.stringify(binding ? [line.slot, binding.role, binding.mood_map[line.mood] ?? null] : [line.slot, null, line.mood]); };
+  for (const line of data.script.lines) {
+    const group = groups.at(-1), previous = group?.lines.at(-1);
+    if (previous && voice(previous) === voice(line) && previous.pause_after_ms < 1000 && [...joined([...group.lines, line])].length <= 200) group.lines.push(line);
+    else groups.push({id: line.id, slot: line.slot, lines: [line]});
+  }
+  return groups.map(g => ({id: g.id, slot: g.slot, line_ids: g.lines.map(l => l.id), text: joined(g.lines)}));
+}
+function groupForLine(id) { return reviewGroups().find(g => g.line_ids.includes(id)); }
+function groupState(group) {
+  const states = group.line_ids.map(lineStatus);
+  return ['running', 'queued', 'failed', 'pending'].find(s => states.includes(s)) || 'succeeded';
+}
+function groupLabel(group) { return group.line_ids.length > 1 ? `${group.id}–${group.line_ids.at(-1)} · ${group.line_ids.length} 行` : `${group.id} · 1 行`; }
+function segmentSource(id) {
+  const group = groupForLine(id), clip = data?.group_audio?.[group?.id];
+  return clip && !dirty && group.line_ids.every(key => data.preflight?.reusable_ids?.includes(key)) ? url(`/groups/${encodeURIComponent(group.id)}/audio?version=${encodeURIComponent(clip.sha256)}`) : '';
+}
+async function playLine(id) {
+  const group = groupForLine(id); id = group.id;
+  const source = segmentSource(id), player = $('linePlayer');
+  if (!source) throw Error('请先保存并生成本组配音，再试听');
+  if (playingLine === id && !player.paused) { player.pause(); return; }
+  $$('audio').forEach(audio => { if (audio !== player) audio.pause(); });
+  if (player.getAttribute('src') !== source) { player.src = source; player.load(); }
+  playingLine = id; linePlayerLoading = true;
+  $('linePlayerDock').hidden = false;
+  $('linePlayerTitle').textContent = `整组试听 ${groupLabel(group)} · ${group.text}`;
+  updateLineReview();
+  try { await player.play(); }
+  catch (error) { linePlayerLoading = false; updateLineReview(); if (error.name !== 'AbortError') throw Error('试听加载失败，请刷新后重试'); }
+}
+for (const event of ['playing', 'pause', 'ended', 'waiting', 'error']) {
+  $('linePlayer').addEventListener(event, () => {
+    linePlayerLoading = event === 'waiting'; updateLineReview();
+    if (event === 'error' && $('linePlayer').getAttribute('src')) toast('整组音频加载失败，请刷新后重试', true);
+  });
+}
+function updateLineReview() {
+  if (!data) return;
+  const groups = reviewGroups(), ids = new Set(groups.map(g => g.id));
+  for (const id of selectedLines) if (!ids.has(id)) selectedLines.delete(id);
+  const busy = lastTasks.some(t => t.project === current && activeTask(t.status));
+  const blocked = videoUploading || lastTasks.some(t => t.project === current && activeTask(t.status) && !['synth', 'retry'].includes(t.label));
+  $('selectAllLines').checked = !!ids.size && selectedLines.size === ids.size;
+  $('selectAllLines').indeterminate = selectedLines.size > 0 && selectedLines.size < ids.size;
+  $('selectAllLines').disabled = !ids.size || dirty;
+  $('lineSelectionCount').textContent = `已选 ${selectedLines.size} 组`;
+  $('retrySelectedLines').disabled = !selectedLines.size || blocked || !!retrySubmitting.size || dirty;
+  const running = groups.filter(g => groupState(g) === 'running').length;
+  const queued = groups.filter(g => groupState(g) === 'queued').length;
+  $('lineReviewState').textContent = running || queued ? `${running} 组生成中 · ${queued} 组排队中` : dirty ? '保存后更新语音分组' : '直接试听完整语音组，满意后再合并';
+  $('lineReviewState').classList.toggle('running', !!running);
+  $$('.speech-group', $('lines')).forEach(section => {
+    const group = groups.find(g => g.id === section.dataset.groupId); if (!group) return;
+    const id = group.id, state = groupState(group);
+    section.dataset.state = state; section.setAttribute('aria-busy', String(state === 'running'));
+    const status = section.querySelector('[data-group-status]');
+    status.className = `status ${state}`; status.textContent = LINE_STATES[state] || state;
+    section.querySelector('[data-group-select]').checked = selectedLines.has(id);
+    section.querySelector('[data-group-select]').disabled = dirty;
+    const retry = section.querySelector('[data-group-retry]');
+    retry.disabled = blocked || ['queued', 'running'].includes(state) || dirty;
+    retry.setAttribute('aria-busy', String(state === 'running'));
+    const listen = section.querySelector('[data-group-listen]'), on = playingLine === id && !$('linePlayer').paused;
+    listen.disabled = !segmentSource(id) || ['queued', 'running'].includes(state);
+    listen.classList.toggle('loading', playingLine === id && linePlayerLoading);
+    listen.setAttribute('aria-pressed', String(on));
+    listen.setAttribute('aria-label', `${on ? '暂停整组试听' : '整组试听'} ${id}`);
+    listen.innerHTML = `${icon(on ? 'stop' : 'play')}<span>${on ? '暂停' : '整组试听'}</span>`;
+    const clip = data.group_audio?.[id];
+    section.querySelector('[data-group-duration]').textContent = clip && !dirty ? `${clip.duration.toFixed(1)} 秒` : '';
+  });
+  $$('.line', $('lines')).forEach(row => {
+    const state = lineStatus(row.dataset.id);
+    row.dataset.state = state;
+    const status = row.querySelector('.status');
+    if (status) { status.className = `status ${state}`; status.textContent = LINE_STATES[state] || state; }
+    $$('[data-field], [data-delete]', row).forEach(el => el.disabled = busy);
+    const handle = row.querySelector('.handle'); if (handle) handle.draggable = !busy;
+  });
+  $('addLine').disabled = busy;
+  $$('#bindings select, #personas textarea').forEach(el => el.disabled = busy);
+  $$('[data-approve="script"], [data-approve="binding"]').forEach(el => el.disabled = busy);
+}
+let retrySubmission = Promise.resolve();
+function retryLines(ids) {
+  const name = current, requested = [...new Set(ids)];
+  for (const id of requested) retrySubmitting.add(id);
+  updateLineReview(); renderLineMap();
+  const operation = retrySubmission.catch(() => {}).then(async () => {
+    if (current !== name) return;
+    if (dirty) await save();
+    const task = await api(url('/actions'), 'POST', {action: 'retry', line_ids: requested, concurrency: Number($('synthesisConcurrency').value)});
+    if (task.line_ids.includes(playingLine)) stopLineAudio();
+    lastTasks = [...lastTasks.filter(t => t.id !== task.id), task]; taskStatus.set(task.id, task.status);
+    toast(`已加入整组重生成队列 · ${task.line_ids.length} 行台词`);
+    await pollTasks();
+  }).finally(() => { for (const id of requested) retrySubmitting.delete(id); updateLineReview(); renderLineMap(); });
+  retrySubmission = operation;
+  return operation;
+}
+$('selectAllLines').onchange = () => { selectedLines.clear(); if ($('selectAllLines').checked) reviewGroups().forEach(group => selectedLines.add(group.id)); updateLineReview(); };
+$('retrySelectedLines').onclick = () => safe(() => retryLines([...selectedLines]));
+$('reviewLineAudio').onclick = () => { switchTab('script'); $('lines').scrollTop = 0; $('lines').closest('.lines-card').scrollIntoView({block: 'start'}); };
 
 function renderLineStats() {
   const lines = data.script.lines;
@@ -285,7 +420,9 @@ function renderLines() {
     $('lines').innerHTML = '<div class="empty-lines">还没有台词。点左侧“生成台词”，或手动添加一行。</div>';
     return;
   }
-  $('lines').innerHTML = lines.map(line => {
+  $('lines').innerHTML = reviewGroups().map(group => `<section class="speech-group" data-group-id="${escape(group.id)}" style="${speakerVar(group.slot)}">
+    <div class="speech-group-head"><label class="check"><input type="checkbox" data-group-select aria-label="选择语音组 ${escape(group.id)}">${escape(group.slot.toUpperCase())} · ${escape(groupLabel(group))}</label><span class="status" data-group-status></span><span class="group-tools"><button class="btn ghost sm line-listen" data-group-listen aria-label="整组试听 ${escape(group.id)}">整组试听</button><span class="muted small" data-group-duration></span><button class="btn ghost sm" data-group-retry aria-label="重新生成本组 ${escape(group.id)}">${icon('refresh')}重生成本组</button></span></div>
+    ${group.line_ids.map(id => lines.find(line => line.id === id)).filter(Boolean).map(line => {
     const status = lineStatus(line.id);
     const missing = !data.cast[line.slot]?.mood_map[line.mood];
     return `<div class="line" data-id="${escape(line.id)}" style="${speakerVar(line.slot)}">
@@ -296,12 +433,18 @@ function renderLines() {
           <select data-field="mood" class="mood ${missing ? 'bad' : ''}" title="${missing ? '该情绪尚未映射到音色' : '情绪'}" aria-label="情绪">${options(Object.keys(config.moods || {}), line.mood, '', true)}</select>
           <span class="pause" title="句后停顿（毫秒）；合并配音组内按标点自然停顿，组尾追加此停顿。至少 1000 ms 时分组。"><input data-field="pause_after_ms" type="number" min="0" max="10000" step="50" value="${line.pause_after_ms}" aria-label="句后停顿"></span>
           <span class="meta"><span class="status ${status}">${escape(LINE_STATES[status] || status)}</span><span>${escape(line.id)}</span></span>
-          <span class="tools"><button class="icon-btn" data-retry title="重新合成这一行所在的连续语音组" aria-label="重试">${icon('refresh')}</button><button class="icon-btn danger" data-delete title="删除这一行" aria-label="删除">${icon('x')}</button></span>
+          <span class="tools"><button class="icon-btn danger" data-delete title="删除这一行" aria-label="删除">${icon('x')}</button></span>
         </div>
         <textarea data-field="words" rows="1" aria-label="台词" placeholder="输入台词（3–200 字）">${escape(line.words)}</textarea>
       </div>
     </div>`;
-  }).join('');
+  }).join('')}</section>`).join('');
+  $$('.speech-group', $('lines')).forEach(section => {
+    const id = section.dataset.groupId;
+    section.querySelector('[data-group-retry]').onclick = () => safe(() => retryLines([id]));
+    section.querySelector('[data-group-listen]').onclick = () => safe(() => playLine(id));
+    section.querySelector('[data-group-select]').onchange = event => { if (event.target.checked) selectedLines.add(id); else selectedLines.delete(id); updateLineReview(); };
+  });
 
   $$('.line', $('lines')).forEach(row => {
     const id = row.dataset.id;
@@ -321,7 +464,7 @@ function renderLines() {
     validateLineInput(row.querySelector('textarea'));
     autoGrow(row.querySelector('textarea'));
     row.querySelector('[data-delete]').onclick = () => { data.script.lines = data.script.lines.filter(l => l.id !== id); markDirty(); renderLines(); renderBindings(); };
-    row.querySelector('[data-retry]').onclick = () => safe(() => action('retry', id));
+
 
     const handle = row.querySelector('.handle');
     handle.ondragstart = event => { dragged = id; event.dataTransfer.setData('text/plain', id); event.dataTransfer.setDragImage(row, 20, 20); row.classList.add('dragging'); };
@@ -338,6 +481,7 @@ function renderLines() {
       dragged = null; markDirty(); renderLines();
     };
   });
+  updateLineReview();
 }
 
 /* ───────── 音色绑定 ───────── */
@@ -378,11 +522,6 @@ function collect() {
   data.script.meta.topic = $('topic').value;
   data.script.meta.keywords = $('keywords').value.split(/[,，]/).map(v => v.trim()).filter(Boolean);
   data.script.meta.guidance = $('guidance').value; data.script.meta.brief = $('brief').value;
-  data.script.meta.prompts ||= {};
-  for (const key of ['brief', 'structure']) {
-    const value = $(`${key}Prompt`).value;
-    data.script.meta.prompts[key] = value.trim() === config.script_prompts[key].trim() ? '' : value;
-  }
 }
 async function save() {
   if (!data) return;
@@ -395,7 +534,9 @@ async function save() {
   collect(); setSaveState('保存中…');
   const result = await api(url(''), 'PUT', {script: data.script, cast: data.cast});
   if (videoDirty) await saveVideo();
-  dirty = false; setSaveState('已保存'); renderSteps();
+  dirty = false; const fresh = await api(url(''));
+  for (const key of ['speech_groups', 'group_audio', 'manifest', 'preflight']) data[key] = fresh[key];
+  setSaveState('已保存'); renderSteps(); renderLines(); updateLineReview();
   $('title').textContent = data.script.meta.topic || '未命名对话';
   document.title = `${data.script.meta.topic || current} - SpeakVideo 音频工作台`;
   renderPromptState(); renderReport(result.preflight);
@@ -433,7 +574,15 @@ function renderReport(report) {
 }
 function renderLineMap() {
   if (!data) return;
-  $('lineMap').innerHTML = data.script.lines.map(l => { const s = lineStatus(l.id); return `<i class="${s}" title="${escape(l.id)} · ${escape(LINE_STATES[s] || s)}：${escape(l.words.slice(0, 30))}"></i>`; }).join('');
+  const markup = reviewGroups().map(g => { const s = groupState(g); return `<button type="button" data-line-jump="${escape(g.id)}" class="${s}" aria-label="语音组 ${escape(g.id)} ${escape(LINE_STATES[s] || s)}" title="${escape(groupLabel(g))} · ${escape(LINE_STATES[s] || s)}：${escape(g.text.slice(0, 30))}"></button>`; }).join('');
+  for (const host of [$('lineMap'), $('lineReviewMap')]) {
+    host.innerHTML = markup;
+    $$('[data-line-jump]', host).forEach(button => button.onclick = () => {
+      switchTab('script');
+      const row = $$('.line', $('lines')).find(row => row.dataset.id === button.dataset.lineJump);
+      row?.scrollIntoView({block: 'center', behavior: 'smooth'}); row?.closest('.speech-group')?.querySelector('[data-group-listen]')?.focus();
+    });
+  }
 }
 function renderMedia() {
   const has = !!data.media.bgm;
@@ -455,20 +604,38 @@ function updateExports() {
     if ($('masterAudio').getAttribute('src') !== source) $('masterAudio').src = source;
     $('exports').innerHTML = Object.entries(meta.files).map(([name, file]) => `<a href="${url('/files/exports/' + file.path)}" download>↓ ${escape(name)} <small>${fmtBytes(file.bytes)}</small></a>`).join('');
   } else {
-    $('exports').innerHTML = '<p class="hint">还没有导出音频。先合成配音，再点“合并并导出”。</p>';
+    $('exports').innerHTML = '<p class="hint">先在台词页逐句试听，效果满意后再点“满意，合并完整音频”。</p>';
   }
 }
 async function action(type, lineId) {
+  if (type === 'retry') return retryLines([lineId]);
   if (videoUploading) throw Error('请等待素材上传完成');
   if (type === 'brief' && !$('topic').value.trim()) throw Error('请先填写话题，再生成草稿');
   if (type === 'generate' && !$('brief').value.trim()) throw Error('请先生成或填写草稿，再生成台词');
   if (type === 'generate' && data.script.lines.length && !confirm('重新生成将替换全部台词并清空复用记录，继续吗？')) return;
   if (type === 'extend' && !$('brief').value.trim()) throw Error('请先填写或生成草稿，再扩展对话');
-  await save();
+  if (dirty) await save();
+  if (['synth', 'retry', 'run'].includes(type)) await saveSynthesisConcurrency();
   if (['render', 'cover'].includes(type)) await saveVideo();
-  const task = await queue(url('/actions'), {action: type, line_id: lineId || null});
+  const task = await queue(url('/actions'), {action: type, line_id: lineId || null,
+    ...(['synth', 'retry', 'run'].includes(type) ? {concurrency: Number($('synthesisConcurrency').value)} : {})});
   if (LLM_ACTIONS.has(type)) followLLM(task); else toast(`已加入队列：${TASK_LABELS[task.label] || task.label}`);
 }
+
+function renderSynthesisConcurrency() {
+  $('synthesisConcurrencyOut').textContent = `${$('synthesisConcurrency').value} 组`;
+}
+let synthesisSaving = Promise.resolve();
+function saveSynthesisConcurrency() {
+  const name = current, concurrency = Number($('synthesisConcurrency').value);
+  synthesisSaving = synthesisSaving.catch(() => {}).then(async () => {
+    const saved = await api(`/api/projects/${encodeURIComponent(name)}/synthesis`, 'PUT', {concurrency});
+    if (current === name) { data.synthesis = saved; renderSynthesisConcurrency(); }
+  });
+  return synthesisSaving;
+}
+$('synthesisConcurrency').oninput = renderSynthesisConcurrency;
+$('synthesisConcurrency').onchange = () => safe(saveSynthesisConcurrency);
 
 /* ───────── 流式生成：草稿逐字出现，台词逐条追加，可随时停止 ─────────
    服务端只推送增量；停止会关闭模型连接并放弃本次结果，工程内容保持生成前的样子。 */
@@ -577,27 +744,8 @@ $$('[data-stop-llm]').forEach(b => b.onclick = () => safe(() => stopLLM()));
 $$('[data-discard-llm]').forEach(b => b.onclick = () => safe(() => stopLLM({keep: false})));
 
 /* ───────── 视频工作台 ───────── */
-function renderVideoAssets() {
-  const assets = data.video?.assets || [];
-  $('videoAssetCount').textContent = `${assets.length} 个素材`;
-  $('videoAssets').innerHTML = assets.map((asset, index) => {
-    const source = url('/files/' + asset.path);
-    return `<div class="video-asset">
-      ${asset.kind === 'image' ? `<img src="${source}" alt="${escape(asset.name)}">` : `<video src="${source}" controls muted preload="metadata" playsinline aria-label="${escape(asset.name)}"></video>`}
-      <div class="video-asset-info"><b>${index + 1}. ${escape(asset.name)}</b><small>${asset.kind === 'image' ? '图片' : fmtTime(asset.duration)} · ${fmtBytes(asset.bytes)}</small>
-        <div class="row"><button class="btn ghost sm" data-video-move="${index}" data-delta="-1" data-boundary="${index === 0}" ${index === 0 ? 'disabled' : ''}>上移</button><button class="btn ghost sm" data-video-move="${index}" data-delta="1" data-boundary="${index === assets.length - 1}" ${index === assets.length - 1 ? 'disabled' : ''}>下移</button><button class="btn ghost sm" data-video-remove="${index}">移除</button></div>
-      </div></div>`;
-  }).join('') || '<p class="hint">添加本地视频或图片，也可以直接生成字幕背景视频。</p>';
-  $$('[data-video-move]').forEach(button => button.onclick = () => {
-    const i = Number(button.dataset.videoMove), j = i + Number(button.dataset.delta);
-    [assets[i], assets[j]] = [assets[j], assets[i]];
-    videoDirty = true; markDirty(); renderVideoAssets(); toast('素材顺序已调整，保存后生效');
-  });
-  $$('[data-video-remove]').forEach(button => button.onclick = () => {
-    assets.splice(Number(button.dataset.videoRemove), 1);
-    videoDirty = true; markDirty(); renderVideoAssets(); toast('素材已移出列表，保存后生效');
-  });
-}
+function renderVideoAssets() { renderFootage(); }
+
 function renderVideo() {
   data.video ||= {assets: [], options: {width: 1080, height: 1920, fps: 30, font_size: 48, image_seconds: 5, burn_subtitles: true}};
   videoDirty = false;
@@ -609,22 +757,21 @@ function renderVideo() {
   $('videoImageSeconds').value = options.image_seconds;
   $('videoFontSize').value = options.font_size;
   $('videoBurnSubtitles').checked = options.burn_subtitles;
-  $('videoSubtitleLegend').innerHTML = data.script.cast.map(member => `<span><i style="background:${escape(config.subtitle_colors?.[member.slot] || '#FFFFFF')}"></i>${escape(data.cast[member.slot]?.role || member.slot)} · ${member.slot === 'p1' ? '蓝色' : '橙色'}</span>`).join('');
+  $('videoSubtitleLegend').innerHTML = data.script.cast.map(member => `<span><i style="background:${escape(config.subtitle_colors?.[member.slot] || '#FFFFFF')}"></i>${escape(data.cast[member.slot]?.role || member.slot)} · 白字${member.slot === 'p1' ? '橙色' : '蓝色'}描边</span>`).join('');
   $('videoAudioState').textContent = data.audio_current ? `完整音频 · ${fmtTime(data.audio_export.duration)}` : '请先合并导出完整音频';
   renderVideoAssets();
   renderDesign();
-  const meta = data.video_export, file = meta?.files?.['final.mp4'];
+  const meta = data.video_export;
+  const file = Object.entries(meta?.files || {}).find(([name]) => name.endsWith('.mp4'))?.[1];
   $('approveVideo').disabled = !data.video_current || !data.workflow.approvals.audio;
   $('approveVideo').textContent = data.workflow.approvals.video ? '成片已确认' : '确认当前成片';
-  $('deliveryState').textContent = !data.workflow.approvals.audio ? '先到第 3 步试听并确认完整音频，再确认成片' : !data.video_current ? '请先合成与当前工程一致的视频' : !data.workflow.approvals.video ? '预览并确认当前成片后，可打包音视频、字幕和工程快照' : data.delivery_current ? '交付包与当前工程一致' : '成片已确认，可以打包交付';
-  $('deliveryExports').innerHTML = Object.entries(data.delivery_export?.files || {}).map(([name, f]) => `<a href="${url('/files/exports/' + f.path)}" download>↓ ${escape(name)} <small>${fmtBytes(f.bytes)}</small></a>`).join('');
   $('finalVideo').hidden = !file; $('videoEmpty').hidden = !!file;
   if (file) {
     const source = url('/files/exports/' + file.path);
     if ($('finalVideo').getAttribute('src') !== source) $('finalVideo').src = source;
     $('videoState').textContent = `${meta.mode === 'demo' ? '测试音频 · ' : ''}${fmtTime(meta.duration)} · ${meta.options.width} × ${meta.options.height} · ${data.video_current ? '与当前工程一致' : '设置或工程已变化，请重新合成'}`;
     $('videoState').classList.toggle('stale', !data.video_current);
-    $('videoExports').innerHTML = Object.entries(meta.files).map(([name, f]) => `<a href="${url('/files/exports/' + f.path)}" download>↓ ${escape(name)} <small>${fmtBytes(f.bytes)}</small></a>`).join('');
+    $('videoExports').innerHTML = Object.entries(meta.files).map(([name, f]) => `<a href="${url('/files/exports/' + f.path)}" download="${escape(name)}">↓ ${escape(name)} <small>${fmtBytes(f.bytes)}</small></a>`).join('');
   } else {
     $('finalVideo').removeAttribute('src'); $('finalVideo').load();
     $('videoState').textContent = '';
@@ -643,13 +790,13 @@ $('videoFiles').onchange = () => safe(async () => {
   const files = [...$('videoFiles').files], name = current;
   if (!files.length) return;
   await save(); await saveVideo();
-  videoUploading = true; $('videoFiles').disabled = true;
+  videoUploading = true; $('videoFiles').disabled = true; renderTasks();
   try {
     for (let i = 0; i < files.length; i++) {
       $('videoUploadState').textContent = `上传 ${i + 1}/${files.length}：${files[i].name}`;
       const form = new FormData(); form.append('file', files[i]);
-      const config = await api(`/api/projects/${encodeURIComponent(name)}/assets/video`, 'POST', form);
-      if (name === current) { data.video = config; renderVideoAssets(); renderDesignScene(); }
+      const config = await uploadFootage(name, form, (loaded, total) => { $('videoUploadState').textContent = `上传 ${i + 1}/${files.length} · ${total ? Math.round(loaded / total * 100) + '%' : fmtBytes(loaded)} · ${files[i].name}${total && loaded >= total ? ' · 正在读取素材信息…' : ''}`; });
+      if (name === current) { data.video = config; renderVideoAssets(); renderDesignScene(); renderTasks(); }
     }
     if (name === current) await selectProject(current, {keepTab: true});
     toast(`已添加 ${files.length} 个素材`);
@@ -661,7 +808,7 @@ async function approval(gate) {
   await save();
   await api(url(`/approve/${gate}`), 'POST', {});
   data.workflow.approvals[gate] = true;
-  toast({script: '剧本已定稿', binding: '音色绑定已确认', audio: '完整音频已确认', video: '当前成片已确认，可以打包交付'}[gate]);
+  toast({script: '剧本已定稿', binding: '音色绑定已确认', audio: '完整音频已确认', video: '当前成片已确认'}[gate]);
   if (gate === 'video') await selectProject(current, {keepTab: true});
   if (gate === 'script') switchTab('binding'); else if (gate === 'binding') switchTab('production'); else if (gate === 'audio') switchTab('video'); else renderSteps();
 }
@@ -672,7 +819,8 @@ function taskDetail(t) {
   if (p?.total > 0 && ['lines', 'assets'].includes(p.kind)) {
     parts.push(`${p.completed}/${p.total} ${p.kind === 'lines' ? '行' : '个素材'}`);
     if (p.failed) parts.push(`失败 ${p.failed} 行`);
-    if (p.current_line && t.status === 'running') parts.push(`正在合成 ${p.current_line}`);
+    if (p.concurrency) parts.push(t.status === 'running' ? `并发 ${p.concurrency} 组 · 当前 ${p.active_groups || 0} 组` : `并发 ${p.concurrency} 组`);
+    else if (p.current_line && t.status === 'running') parts.push(`正在合成 ${p.current_line}`);
   }
   if (t.status === 'queued') parts.push('等待前序任务完成');
   else if (p?.stage && t.status === 'running') parts.push(p.stage);
@@ -687,19 +835,19 @@ function renderTasks() {
   const active = lastTasks.filter(t => ['queued', 'running'].includes(t.status));
   $('taskBadge').textContent = active.length || '';
   const busy = videoUploading || active.some(t => t.project === current);
-  $$('[data-action]').forEach(b => b.disabled = busy || (b.dataset.action === 'render' && !data?.audio_current));
+  $('synthesisConcurrency').disabled = busy;
+  $$('[data-action]').forEach(b => b.disabled = busy || (b.dataset.action === 'render' && !data?.audio_current) || (b.dataset.action === 'merge' && (!data?.script.lines.length || data.preflight?.reusable !== data.script.lines.length || dirty)));
   renderDraftTimeline();
-  const packageButton = document.querySelector('[data-action="package"]');
-  const coverReady = !data?.video.cover.options.enabled || data?.cover_current;
-  packageButton.disabled = busy || videoDirty || !coverReady || !data?.video_current || !data?.workflow.approvals.video;
+  const coverReady = data?.cover_current;
   $('approveVideo').disabled = busy || videoDirty || !coverReady || !data?.video_current || !data?.workflow.approvals.audio;
   for (const id of ['videoFiles', 'saveVideo', 'overlayFiles', 'coverFile', 'previewCover']) $(id).disabled = busy;
   $$('input, select, textarea, button', $('overlayControls')).forEach(el => el.disabled = busy);
   $$('input, select, textarea', document.querySelector('.video-cover-card')).forEach(el => el.disabled = busy);
   $('video').classList.toggle('design-busy', busy);
-  $('playDesignAudio').disabled = busy || !data?.audio_current || designMode === 'cover';
-  if (busy) stopDesignPlayback();
-  $$('[data-video-move], [data-video-remove]').forEach(b => b.disabled = busy || b.dataset.boundary === 'true');
+  if (busy) $('designBackgroundVideo').pause();
+  $$('[data-video-move], [data-video-remove], [data-source-open], [data-source-remove], [data-clip-edit], [data-clip-add]').forEach(b => b.disabled = busy || b.dataset.boundary === 'true');
+  $$('button, input, select', $('footageEditor')).forEach(el => el.disabled = busy);
+  updateLineReview();
 
   $('tasks').innerHTML = tasks.slice(0, 20).map(t => {
     const p = t.progress;
@@ -750,12 +898,14 @@ async function pollTasks() {
   // 刷新页面或切回工程时，接上仍在进行的模型输出
   const resumable = current && !live && tasks.find(t => t.project === current && t.streaming && t.label !== 'llm_test' && !stoppedTasks.has(t.id));
   if (resumable) followLLM(resumable);
-  let refresh = false, homeChanged = false, historyChanged = false;
+  let refresh = false, fullRefresh = false, homeChanged = false, historyChanged = false;
   for (const t of tasks) {
     const prev = taskStatus.get(t.id);
     if (prev !== t.status && t.project) homeChanged = true;
     if (taskStatus.has(t.id) && prev !== t.status) {
-      if (t.project === current && ['succeeded', 'failed', 'paused'].includes(t.status)) refresh = true;
+      if (t.project === current && ['succeeded', 'failed', 'paused'].includes(t.status)) {
+        refresh = true; if (!['synth', 'retry'].includes(t.label)) fullRefresh = true;
+      }
       if (t.status === 'succeeded' && ['design','preview','create'].includes(t.label)) historyChanged = true;
       if (t.status === 'succeeded' && t.label !== 'create') toast(`${TASK_LABELS[t.label] || t.label}已完成${t.label === 'llm_test' && t.result ? `：${t.result}` : ''}`);
       if (['paused','interrupted'].includes(t.status) && !(LLM_ACTIONS.has(t.label) && t.status === 'paused')) toast(`${TASK_LABELS[t.label] || t.label}${TASK_STATES[t.status]}`);
@@ -795,10 +945,16 @@ async function pollTasks() {
   store.set('voicePreviewTasks', [...previewTasks].filter(([id]) => !id.startsWith('submitting:')).slice(-50));
   renderPreviewState(); renderFactoryTasks(); if (historyChanged) await refreshVoiceHistory();
   // 运行中也同步行状态，让进度点实时变化
-  const running = tasks.some(t => t.project === current && t.status === 'running' && !LLM_ACTIONS.has(t.label));
-  if ((refresh || running) && !dirty && current) {
-    if (refresh) await selectProject(current, {keepTab: true});
-    else { data = {...data, ...(await api(url('')))}; data.workflow.approvals ||= {}; renderLineMap(); renderLineStats(); $$('.line').forEach(row => { const s = lineStatus(row.dataset.id); const el = row.querySelector('.status'); if (!el) return; el.className = `status ${s}`; el.textContent = LINE_STATES[s] || s; }); }
+  const running = tasks.some(t => t.project === current && activeTask(t.status) && !LLM_ACTIONS.has(t.label));
+  if ((refresh || running) && current) {
+    if (fullRefresh && !dirty) await selectProject(current, {keepTab: true});
+    else {
+      const name = current, fresh = await api(url(''));
+      if (name === current) {
+        for (const key of ['manifest', 'preflight', 'group_audio', 'speech_groups', 'audio_export', 'audio_current', 'workflow', 'video_current', 'cover_current']) data[key] = fresh[key];
+        renderReport(data.preflight); renderLineStats(); updateLineReview(); updateExports(); renderSteps();
+      }
+    }
   }
   } finally { tasksPolling = false; }
 }
@@ -1258,18 +1414,18 @@ document.addEventListener('keydown', event => {
 ['topic', 'keywords', 'guidance', 'brief'].forEach(id => $(id).oninput = markDirty);
 
 /* ───────── 脚本提示词 ─────────
-   打开时记下快照；取消或 Esc 撤回到快照，“保存提示词”才写入工程。 */
+   打开时读取全局配置；取消撤回编辑，保存只写全局文件。 */
 const PROMPT_HINTS = {
-  brief: '第一步“生成草稿”时使用。话题、关键词、本次要求和人设在创作设定里填写。',
-  structure: '点“生成台词”时使用。实际请求由这份写法加上固定的 JSON 规范组成。',
-  contract: '每次生成台词都会自动附加，只读。两组完整的输入、输出示例演示草稿转换、长回答拆行和无草稿生成。',
+  brief: '所有工程的草稿生成与扩展共用。',
+  structure: '所有工程的台词生成共用。',
+  contract: '全局固定规范，生成台词时自动附加。',
 };
 let promptTab = 'brief', promptSnapshot = null;
-const promptCustom = key => $(`${key}Prompt`).value.trim() !== (config.script_prompts?.[key] || '').trim();
+const promptCustom = key => $(`${key}Prompt`).value.trim() !== (config.script_prompt_defaults?.[key] || '').trim();
 function renderPromptState() {
   for (const key of ['brief', 'structure']) {
     const custom = promptCustom(key);
-    $(`${key}PromptState`).textContent = custom ? '已自定义' : '默认';
+    $(`${key}PromptState`).textContent = custom ? '自定义' : '全局';
     $(`${key}PromptState`).parentElement.classList.toggle('custom', custom);
     document.querySelector(`[data-prompt-tab="${key}"]`).classList.toggle('custom', custom);
   }
@@ -1290,9 +1446,13 @@ function showPromptTab(tab) {
   area.scrollTop = 0; if ($('promptDialog').open) area.focus({preventScroll: true});
 }
 function openPrompts(tab = 'brief') {
-  if (!data) return;
-  promptSnapshot = {brief: $('briefPrompt').value, structure: $('structurePrompt').value};
-  $('promptDialog').showModal(); showPromptTab(tab);
+  if ($('promptDialog').open) { showPromptTab(tab); return; }
+  safe(async () => {
+    config.script_prompts = await api('/api/script-prompts');
+    for (const key of ['brief', 'structure']) $(`${key}Prompt`).value = config.script_prompts[key];
+    promptSnapshot = {...config.script_prompts};
+    $('promptDialog').showModal(); showPromptTab(tab);
+  });
 }
 const promptsChanged = () => !!promptSnapshot && ['brief', 'structure'].some(k => $(`${k}Prompt`).value !== promptSnapshot[k]);
 function cancelPrompts() {
@@ -1301,16 +1461,24 @@ function cancelPrompts() {
   promptSnapshot = null; $('promptDialog').close(); renderPromptState();
 }
 function savePrompts() {
-  const changed = promptsChanged();
-  promptSnapshot = null; $('promptDialog').close(); renderPromptState();
-  if (!changed) return;
-  markDirty();
-  safe(async () => { await save(); toast('提示词已保存，下次生成时生效'); });
+  safe(async () => {
+    $('savePrompts').disabled = true;
+    try {
+      if (promptsChanged()) {
+        config.script_prompts = await api('/api/script-prompts', 'PUT', {
+          brief: $('briefPrompt').value, structure: $('structurePrompt').value,
+        });
+        for (const key of ['brief', 'structure']) $(`${key}Prompt`).value = config.script_prompts[key];
+        toast('全局提示词已保存');
+      }
+      promptSnapshot = null; $('promptDialog').close(); renderPromptState();
+    } finally { $('savePrompts').disabled = false; }
+  });
 }
 $$('[data-open-prompt]').forEach(b => b.onclick = () => openPrompts(b.dataset.openPrompt));
 $$('[data-prompt-tab]').forEach(b => b.onclick = () => showPromptTab(b.dataset.promptTab));
 ['briefPrompt', 'structurePrompt'].forEach(id => $(id).oninput = renderPromptState);
-$('resetPrompt').onclick = () => { $(`${promptTab}Prompt`).value = config.script_prompts[promptTab]; renderPromptState(); $(`${promptTab}Prompt`).focus(); };
+$('resetPrompt').onclick = () => { $(`${promptTab}Prompt`).value = config.script_prompt_defaults[promptTab]; renderPromptState(); $(`${promptTab}Prompt`).focus(); };
 $('closePrompts').onclick = $('cancelPrompts').onclick = cancelPrompts;
 $('savePrompts').onclick = savePrompts;
 $('promptDialog').addEventListener('cancel', event => { event.preventDefault(); cancelPrompts(); });

@@ -50,7 +50,7 @@ class ScriptLine(BaseModel):
 
 
 class ScriptPrompts(BaseModel):
-    """Per-project writing overrides. Empty values use the current defaults."""
+    """Global writing overrides; old script metadata is retained for compatibility only."""
 
     model_config = ConfigDict(extra="forbid")
 

@@ -98,15 +98,18 @@ class Project:
                 "master": sha256(self.root / "exports" / metadata["files"]["master.wav"]["path"]),
             }
         elif gate == "video":
-            from .video import video_config, video_signature
+            from .video import exported_video, video_config, video_signature
 
             metadata = read_json(self.root / "exports/video.json")
+            video_name, _ = exported_video(self)
             data = {
                 "audio": self.digest("audio"),
                 "signature": metadata["signature"],
                 "current_signature": video_signature(self),
                 "settings": read_json(self.root / "video.json", {}),
-                "video": sha256(self.root / "exports" / metadata["files"]["final.mp4"]["path"]),
+                "video": sha256(
+                    self.root / "exports" / metadata["files"][video_name]["path"]
+                ),
             }
             if video_config(self)["cover"]["options"]["enabled"]:
                 cover = read_json(self.root / "exports/cover.json", {})
@@ -160,7 +163,7 @@ class Project:
             "script": "binding_review",
             "binding": "ready",
             "audio": "complete",
-            "video": "delivery_ready",
+            "video": "complete",
         }[gate]
         write_json(self.root / "workflow.json", state)
 

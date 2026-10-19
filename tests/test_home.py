@@ -38,7 +38,7 @@ def test_home_requires_existing_delivery_and_prioritizes_script_changes(project)
     project.approve("binding")
     exports = project.root / "exports"
     exports.mkdir(exist_ok=True)
-    write_json(exports / "video.json", {"files": {"final.mp4": {"path": "missing.mp4"}}})
+    write_json(exports / "video.json", {"files": {"成片.mp4": {"path": "missing.mp4"}}})
     with TestClient(create_app(project.settings)) as client:
 
         def summary():
@@ -48,8 +48,8 @@ def test_home_requires_existing_delivery_and_prioritizes_script_changes(project)
         (exports / "master.mp3").write_bytes(b"test delivery")
         write_json(exports / "audio.json", {"files": {"master.mp3": {"path": "master.mp3"}}})
         assert summary()["stage"] == "已有完整音频"
-        (exports / "final.mp4").write_bytes(b"test delivery")
-        write_json(exports / "video.json", {"files": {"final.mp4": {"path": "final.mp4"}}})
+        (exports / "成片.mp4").write_bytes(b"test delivery")
+        write_json(exports / "video.json", {"files": {"成片.mp4": {"path": "成片.mp4"}}})
         assert summary()["tab"] == "video"
         script = project.script()
         script.lines[0].words += "继续讨论。"

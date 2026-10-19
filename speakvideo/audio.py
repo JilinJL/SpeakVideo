@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import shutil
-import subprocess
 import uuid
 import wave
 from contextlib import ExitStack
 from pathlib import Path
 
-from .jobs import parameters, report, reusable
+from .jobs import group_audio, parameters, report, reusable
 from .processing import ffmpeg, normalize, probe, srt_time
 from .project import Project
 from .storage import lock, read_json, safe_name, sha256, write_json
+from .subtitles import SUBTITLE_TIMING_VERSION, subtitle_cues
+from .tts.grouping import speech_groups
 
 
 class AudioPaused(RuntimeError):
@@ -49,7 +51,8 @@ def audio_signature(project: Project, options: dict) -> str:
         ],
         "audio_settings": project.settings.audio.model_dump(),
         "mix": {**options, "bgm_sha256": sha256(Path(options["bgm"])) if options["bgm"] else None},
-        "pipeline_version": 2,
+        "pipeline_version": 3,
+        "subtitle_timing_version": SUBTITLE_TIMING_VERSION,
     }
     return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
@@ -64,7 +67,15 @@ def audio_current(project: Project, options: dict | None = None) -> bool:
         manifest = read_json(project.root / "manifest.json", {"lines": {}})
         script, cast = project.script(), project.cast()
         if not all(
-            reusable(project, line, cast, manifest["lines"].get(line.id)) for line in script.lines
+            reusable(
+                project,
+                group.lines[0],
+                cast,
+                manifest["lines"].get(group.id),
+                group=group,
+                manifest=manifest,
+            )
+            for group in speech_groups(script.lines, cast)
         ):
             return False
         return all(
@@ -81,7 +92,15 @@ def assemble(
     script, cast = project.script(), project.cast()
     manifest = read_json(project.root / "manifest.json", {"lines": {}})
     if not script.lines or not all(
-        reusable(project, line, cast, manifest["lines"].get(line.id)) for line in script.lines
+        reusable(
+            project,
+            group.lines[0],
+            cast,
+            manifest["lines"].get(group.id),
+            group=group,
+            manifest=manifest,
+        )
+        for group in speech_groups(script.lines, cast)
     ):
         raise ValueError("存在缺失、损坏或过期分句，请先合成/续跑")
     rate = project.settings.audio.model_sample_rate
@@ -95,37 +114,17 @@ def assemble(
         }
         for stream in [combined, *stems.values()]:
             stream.setparams((1, 2, rate, 0, "NONE", "not compressed"))
-        for index, line in enumerate(script.lines, 1):
+        for group in speech_groups(script.lines, cast):
             if cancelled():
-                raise AudioPaused("已暂停；已生成的分句不受影响，旧音频交付保持可用")
-            source = project.root / "audio/segments" / f"{line.id}.wav"
-            pcm = subprocess.run(
-                [
-                    "ffmpeg",
-                    "-v",
-                    "error",
-                    "-nostdin",
-                    "-i",
-                    str(source),
-                    "-f",
-                    "s16le",
-                    "-ac",
-                    "1",
-                    "-ar",
-                    str(rate),
-                    "-",
-                ],
-                capture_output=True,
-                check=True,
-            ).stdout
+                raise AudioPaused("已暂停；已生成的语音组不受影响，旧音频交付保持可用")
+            content = group_audio(project, group, cast, manifest)
+            with wave.open(io.BytesIO(content), "rb") as source:
+                if source.getnchannels() != 1 or source.getsampwidth() != 2:
+                    raise ValueError("语音组必须是单声道 16 位 PCM")
+                pcm = source.readframes(source.getnframes())
+            line = group.lines[0]
             frames = len(pcm) // 2
-            record = manifest["lines"][line.id]
-            # Keep batch interiors continuous; the model already reads their punctuation.
-            pause_ms = (
-                0
-                if record.get("group_id") and not record.get("group_tail")
-                else line.pause_after_ms
-            )
+            pause_ms = group.lines[-1].pause_after_ms
             pause_frames = round(pause_ms * rate / 1000)
             silence = bytes(pause_frames * 2)
             combined.writeframes(pcm + silence)
@@ -136,7 +135,9 @@ def assemble(
                 {
                     "id": line.id,
                     "slot": line.slot,
-                    "words": line.words,
+                    "words": group.text,
+                    "line_ids": [member.id for member in group.lines],
+                    "subtitle_texts": [member.words for member in group.lines],
                     "start": start,
                     "end": end,
                     "duration": frames / rate,
@@ -144,11 +145,14 @@ def assemble(
                     "start_frame": cursor,
                     "end_frame": cursor + frames,
                     "pause_frames": pause_frames,
-                    "alignment": record.get("alignment", "line"),
-                    "group_id": record.get("group_id"),
+                    "alignment": "group" if len(group.lines) > 1 else "line",
+                    "group_id": group.id,
                 }
             )
-            subtitles.append(f"{index}\n{srt_time(start)} --> {srt_time(end)}\n{line.words}\n")
+            for left, right, text in subtitle_cues(timeline[-1]):
+                subtitles.append(
+                    f"{len(subtitles) + 1}\n{srt_time(left)} --> {srt_time(right)}\n{text}\n"
+                )
             cursor += frames + pause_frames
     (destination / "subtitles.srt").write_text("\n".join(subtitles), encoding="utf-8")
     write_json(
