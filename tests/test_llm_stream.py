@@ -168,7 +168,7 @@ def test_stop_closes_stream_and_keeps_project(project, monkeypatch):
     root = project.settings.paths.root
     (root / ".cache").mkdir(exist_ok=True)
     (root / ".cache" / "llm.local.json").write_text(
-        settings().model_dump_json().replace("**********", "secret-key-123")
+        settings().model_dump_json().replace("**********", "secret-key-123"), encoding="utf-8"
     )
     app_settings = load_settings(root)
     app_settings.tts.mode = "demo"
@@ -264,6 +264,6 @@ def test_old_8192_default_is_lifted_on_load(tmp_path):
     body = json.loads(settings(max_tokens=8192).model_dump_json())
     for provider in body["providers"]:
         provider.pop("stream")
-    (tmp_path / ".cache" / "llm.local.json").write_text(json.dumps(body))
+    (tmp_path / ".cache" / "llm.local.json").write_text(json.dumps(body), encoding="utf-8")
     loaded = load_settings(tmp_path).llm.providers[0]
     assert loaded.max_tokens is None and loaded.stream

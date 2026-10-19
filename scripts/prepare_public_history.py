@@ -19,7 +19,11 @@ def main():
         help="Private external git-filter-repo replacement rules; never commit this file",
     )
     args = parser.parse_args()
-    root = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
+    root = Path(
+        subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"], text=True, encoding="utf-8"
+        ).strip()
+    )
     destination = args.destination.expanduser().resolve()
     if destination.exists() or destination.is_relative_to(root):
         raise SystemExit("Choose a new directory outside the checkout.")
@@ -30,7 +34,7 @@ def main():
         ["git", "clone", "--mirror", "--no-hardlinks", str(root), str(destination)], check=True
     )
     refs = subprocess.check_output(
-        ["git", "for-each-ref", "--format=%(refname)"], cwd=destination, text=True
+        ["git", "for-each-ref", "--format=%(refname)"], cwd=destination, text=True, encoding="utf-8"
     ).splitlines()
     for ref in refs:
         # App checkpoints can be tree refs; never let unfiltered private objects survive.
@@ -70,7 +74,7 @@ def main():
     callback = (
         "import hashlib\n"
         f"reviewed = {reviewed!r}\n"
-        f"public_assets = {json.loads(Path(__file__).with_name('public_assets.json').read_text())!r}\n"
+        f"public_assets = {json.loads(Path(__file__).with_name('public_assets.json').read_text(encoding='utf-8'))!r}\n"
         "if filename.endswith((b'.pt', b'.wav', b'.mp4')) and filename.decode('utf-8') not in public_assets:\n"
         "    return (None, mode, blob_id)\n"
         "content = value.get_contents_by_identifier(blob_id)\n"
@@ -107,7 +111,9 @@ def main():
     command.extend(["--replace-text", str(replacements), "--replace-message", str(replacements)])
     subprocess.run(command, cwd=destination, check=True)
     # The candidate contains only local refs. Publishing remains a separate reviewed operation.
-    remotes = subprocess.check_output(["git", "remote"], cwd=destination, text=True).splitlines()
+    remotes = subprocess.check_output(
+        ["git", "remote"], cwd=destination, text=True, encoding="utf-8"
+    ).splitlines()
     if "origin" in remotes:
         subprocess.run(["git", "remote", "remove", "origin"], cwd=destination, check=True)
     print(f"Review candidate at {destination}. No remote push or visibility change was performed.")

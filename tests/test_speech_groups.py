@@ -65,7 +65,7 @@ def test_grouped_calls_preserve_script_and_continuous_master(project, monkeypatc
     assert timeline[0]["pause"] == script.lines[1].pause_after_ms / 1000
     assert timeline[0]["end_frame"] == len(frames(audio_bytes[0])) // 2
     assert timeline[0]["alignment"] == "group"
-    assert (destination / "subtitles.srt").read_text().count(" --> ") >= 3
+    assert (destination / "subtitles.srt").read_text(encoding="utf-8").count(" --> ") >= 3
     assert frames(raw).startswith(frames(audio_bytes[0]))
     synthesize(project)
     assert len(calls) == 2
@@ -341,7 +341,7 @@ def test_long_group_subtitles_page_at_readable_size_without_touching_audio(tmp_p
         8,
         lambda: None,
     )
-    cues = (tmp_path / "subtitle-list.txt").read_text()
+    cues = (tmp_path / "subtitle-list.txt").read_text(encoding="utf-8")
     assert cues.count("file 'subtitle-") >= 8
     assert row == saved
     images = list(tmp_path.glob("subtitle-*.png"))

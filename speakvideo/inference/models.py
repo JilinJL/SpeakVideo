@@ -34,7 +34,7 @@ def validate_model(path: Path, *, verify_hashes=False):
         try:
             validator(path / relative)
         except (OSError, ValueError, KeyError, TypeError, struct.error) as exc:
-            errors.append(f"{relative}: {exc}")
+            errors.append(f"{relative.as_posix()}: {exc}")
 
     def json_file(p):
         result = json.loads(p.read_text(encoding="utf-8"))
@@ -70,7 +70,7 @@ def validate_model(path: Path, *, verify_hashes=False):
                     raise ValueError("分片路径越界")
                 check(folder / name, tensors)
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            errors.append(f"{index}: {exc}")
+            errors.append(f"{index.as_posix()}: {exc}")
 
     for name in (
         "config.json",
@@ -108,7 +108,7 @@ def identity(settings):
     # Changing files, model directory or runtime version invalidates voice/audio caches.
     stat = (
         [
-            (str(p.relative_to(path)), p.stat().st_size, p.stat().st_mtime_ns)
+            (p.relative_to(path).as_posix(), p.stat().st_size, p.stat().st_mtime_ns)
             for p in sorted(path.rglob("*.safetensors"))
         ]
         if path.is_dir()
@@ -151,7 +151,7 @@ def download(settings, key, log=print):
         if errors:
             raise ValueError("模型校验失败：" + "; ".join(errors))
         hashes = {
-            str(p.relative_to(path)): sha256(p)
+            p.relative_to(path).as_posix(): sha256(p)
             for p in sorted(path.rglob("*"))
             if p.is_file()
             and p.suffix in {".safetensors", ".json", ".txt"}

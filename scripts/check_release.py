@@ -11,7 +11,9 @@ import tarfile
 import zipfile
 from pathlib import Path
 
-PUBLIC_ASSETS = json.loads(Path(__file__).with_name("public_assets.json").read_text())
+PUBLIC_ASSETS = json.loads(
+    Path(__file__).with_name("public_assets.json").read_text(encoding="utf-8")
+)
 
 RULES = {
     "private-machine": re.compile(
@@ -62,13 +64,15 @@ def main():
     problems = []
     if args.history:
         records = subprocess.check_output(
-            ["git", "rev-list", "--objects", "--all"], text=True
+            ["git", "rev-list", "--objects", "--all"], text=True, encoding="utf-8"
         ).splitlines()
         for record in records:
             sha, _, name = record.partition(" ")
             if not name:
                 continue
-            kind = subprocess.check_output(["git", "cat-file", "-t", sha], text=True).strip()
+            kind = subprocess.check_output(
+                ["git", "cat-file", "-t", sha], text=True, encoding="utf-8"
+            ).strip()
             if kind == "blob":
                 content = subprocess.check_output(["git", "cat-file", "blob", sha])
                 problems.extend(check(name, content))

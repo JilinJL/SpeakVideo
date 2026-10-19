@@ -242,6 +242,35 @@ def test_runtime_tasks_run_separately_persist_and_guard_gpu_actions(project, mon
     )
 
 
+def test_task_completion_is_persisted_before_becoming_visible(project, monkeypatch):
+    from speakvideo import web
+
+    saving, release = threading.Event(), threading.Event()
+    original_write = web.write_json
+
+    def delayed_write(path, data):
+        if path.name.startswith("task-") and data.get("status") == "succeeded":
+            saving.set()
+            assert release.wait(10)
+        original_write(path, data)
+
+    monkeypatch.setattr(web, "write_json", delayed_write)
+    monkeypatch.setattr(RuntimeManager, "action", lambda *args, **kwargs: "done")
+    with TestClient(create_app(project.settings)) as client:
+        task = client.post("/api/runtime/actions", json={"action": "install"}).json()
+        try:
+            assert saving.wait(10)
+            current = next(t for t in client.get("/api/tasks").json() if t["id"] == task["id"])
+            assert current["status"] == "running"
+        finally:
+            release.set()
+        assert wait(client, task["id"])["status"] == "succeeded"
+        assert (
+            read_json(project.settings.paths.cache / f"task-{task['id']}.json")["status"]
+            == "succeeded"
+        )
+
+
 def test_cross_process_lock_is_nonblocking_and_atomic_write(tmp_path):
     path = tmp_path / "project.lock"
     with lock(path):

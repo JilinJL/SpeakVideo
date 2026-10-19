@@ -170,7 +170,7 @@ def video_config(project: Project) -> dict:
             preview.is_file()
             and preview.stat().st_mtime_ns >= asset_path(project, asset).stat().st_mtime_ns
         ):
-            asset["preview_path"] = str(preview.relative_to(project.root))
+            asset["preview_path"] = preview.relative_to(project.root).as_posix()
         assets.append(asset)
     return {
         "options": VideoOptions.model_validate(config.get("options", {})).model_dump(),

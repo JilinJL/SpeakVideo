@@ -409,15 +409,18 @@ def create_app(settings: Settings) -> FastAPI:
             if time.time() - tasks[old]["finished_at"] > 60:
                 streams.pop(old, None)
 
-        def persist():
-            write_json(settings.paths.cache / f"task-{key}.json", item)
+        def persist(*, status=None):
+            # Publish a terminal state only after its durable record is written.
+            record = item if status is None else {**item, "status": status}
+            write_json(settings.paths.cache / f"task-{key}.json", record)
+            if status is not None:
+                item["status"] = status
 
         persist()
 
         def execute():
             if events[key].is_set():
-                item["status"] = "paused"
-                persist()
+                persist(status="paused")
                 return
             item["status"] = "running"
             item["started_at"] = time.time()
@@ -475,10 +478,9 @@ def create_app(settings: Settings) -> FastAPI:
                 item.setdefault("progress", {})["stage"] = (
                     item.get("error") or item.get("result") or "已停止"
                 )
-                item["status"] = final_status
                 if key in streams:
                     streams[key]["version"] += 1
-                persist()
+                persist(status=final_status)
 
         (runtime_executor if label.startswith("runtime_") else executor).submit(execute)
         return item
