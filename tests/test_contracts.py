@@ -139,7 +139,9 @@ def test_voice_factory_uses_upload_path_and_downloads_pt(project, tmp_path):
         client._client = httpx.Client(
             base_url="http://test", transport=httpx.MockTransport(handler)
         )
-        output = VoiceStore(project.settings).create(client, reference, "示例角色", "平静", "你好。")
+        output = VoiceStore(project.settings).create(
+            client, reference, "示例角色", "平静", "你好。"
+        )
         assert output.read_bytes() == b"pt-result"
         assert paths == ["/api/pt/upload", "/api/pt/create", "/api/pt/download"]
         with pytest.raises(ValueError, match="已存在"):
