@@ -1,4 +1,4 @@
-"""Deploy via the configured my-server-root wrapper; never print credentials.
+"""Deploy via the configured SSH wrapper; never print credentials.
 
 Build first: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go -C gateway build
     -trimpath -ldflags='-s -w' -o ../.cache/speakvideo-gateway .
@@ -18,11 +18,13 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-WRAPPER = Path("/home/example/.codex/skills/my-server-root/scripts/ssh-root.sh")
+WRAPPER = os.environ.get("SPEAKVIDEO_SSH_WRAPPER")
 REMOTE = "/opt/speakvideo"
 
 
 def remote(command: str) -> str:
+    if not WRAPPER:
+        raise RuntimeError("Set SPEAKVIDEO_SSH_WRAPPER to your SSH wrapper script first")
     result = subprocess.run([str(WRAPPER), command], capture_output=True, text=True, timeout=90)
     if result.returncode:
         # The wrapper echoes its command. Never forward captured output containing secrets.

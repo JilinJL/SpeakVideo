@@ -86,7 +86,11 @@ def test_real_portrait_video_has_white_subtitles_with_speaker_outlines_and_no_pa
     config["options"].update(width=480, height=854, font_size=28)
     write_json(project.root / "video.json", config)
     meta = render_video(project)
-    path = project.root / "exports" / next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
+    path = (
+        project.root
+        / "exports"
+        / next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
+    )
     audio = read_json(project.root / "exports/audio.json")
     timeline = read_json(project.root / "exports" / audio["files"]["timeline.json"]["path"])
     pictures = [
@@ -134,7 +138,11 @@ def test_real_video_burns_chinese_subtitles_at_spoken_times_and_preserves_delive
     before_audio = (project.root / "exports/audio.json").read_bytes()
     stages = []
     meta = render_video(project, progress=lambda **kw: stages.append(kw["stage"]))
-    path = project.root / "exports" / next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
+    path = (
+        project.root
+        / "exports"
+        / next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
+    )
     info = probe(path)
     assert {s["codec_name"] for s in info["streams"]} >= {"h264", "aac", "mov_text"}
     assert float(info["format"]["duration"]) == pytest.approx(meta["duration"], abs=0.1)
@@ -155,7 +163,11 @@ def test_real_video_burns_chinese_subtitles_at_spoken_times_and_preserves_delive
     write_json(project.root / "video.json", config)
     assert not video_current(project)
     soft = render_video(project)
-    soft_path = project.root / "exports" / next(v["path"] for n, v in soft["files"].items() if n.endswith(".mp4"))
+    soft_path = (
+        project.root
+        / "exports"
+        / next(v["path"] for n, v in soft["files"].items() if n.endswith(".mp4"))
+    )
     unburned = frame(soft_path, project.root / "unburned.png", 0.2)
     assert (
         sum(ImageStat.Stat(ImageChops.difference(paused.crop(lower), unburned.crop(lower))).mean)
@@ -233,13 +245,18 @@ def test_video_api_upload_sort_loop_render_and_guards(project):
         data = client.get("/api/projects/test").json()
         assert data["video_current"] and data["audio_current"]
         meta = data["video_export"]
-        path = project.root / "exports" / next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
+        path = (
+            project.root
+            / "exports"
+            / next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
+        )
         first = frame(path, project.root / "first.png", 0.1).getpixel((40, 40))
         second = frame(path, project.root / "second.png", 0.7).getpixel((40, 40))
         loop = frame(path, project.root / "loop.png", 1.25).getpixel((40, 40))
         assert first[2] > 200 and second[0] > 200 and loop[2] > 200
         download = client.get(
-            "/api/projects/test/files/exports/" + next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
+            "/api/projects/test/files/exports/"
+            + next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
         )
         assert download.status_code == 200 and download.headers["content-type"] == "video/mp4"
         script = project.script()

@@ -176,7 +176,8 @@ def test_local_qwen_mode_reads_real_qwen_directory_not_speakvideo_copy(project, 
         assert client.get("/api/voices/assets/本机/平静/download").content == b"local-prompt"
         assert client.delete("/api/voices/assets/本机/平静").json()["deleted"]
         assert (
-            not path.exists() and (project.settings.paths.voices / "讲述者" / "讲述者_平静.pt").exists()
+            not path.exists()
+            and (project.settings.paths.voices / "讲述者" / "讲述者_平静.pt").exists()
         )
     assert not read_json(project.settings.paths.cache / "voice-deletions.json", [])
 

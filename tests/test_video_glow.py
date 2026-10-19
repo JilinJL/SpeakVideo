@@ -96,7 +96,11 @@ def test_export_always_shows_both_stickers_and_only_active_speaker_glows(project
         assert saved["video"]["overlays"][1]["speaker_slot"] == "p2"
         assert saved["video_timeline"] == timeline
         meta = render_video(project)
-        path = project.root / "exports" / next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
+        path = (
+            project.root
+            / "exports"
+            / next(v["path"] for n, v in meta["files"].items() if n.endswith(".mp4"))
+        )
         pictures = [
             frame(path, project.root / f"glow-check-{i}.png", second)
             for i, second in enumerate([p1_time, p2_time, silence])
